@@ -22,6 +22,16 @@ This file is the contract that polyforge agents and humans editing this repo MUS
 
 **Layer A is read-only to LLMs.** Polyforge skills MUST NOT write to `architecture/`, `decisions/`, `operations/`, `talks/`, or `archive/`. Graduation from `wiki/lessons/` to `decisions/` is a manual human flow (see §Graduation).
 
+### Immutability exception — lint-class mechanical rewrites
+
+B-sources are immutable for **content**, not for syntax. The following narrow classes of edits are allowed **in-place** without the new-file + `superseded_by` dance, provided the commit message uses the `docs(lint):` prefix:
+
+- **Path / link rot fixes** — e.g. cross-repo prefix corrections (`poc/...` → `<repo>/poc/...`) per §Cross-repo references; broken anchor or URL replacements; renamed-file citations
+- **Formatting normalizations** — whitespace, list-marker consistency, code-fence language tags — anything that does not alter rendered semantic content
+- **Typo / spelling fixes** in non-load-bearing positions (i.e. NOT in decision IDs `D-XX`, numeric values, or quoted citations)
+
+Anything that changes a decision, alters a cited fact, adds or removes material, or shifts an interpretation is NOT lint-class and still requires the new-file flow. Reviewers MAY revert any in-place commit that crosses the line — the contract is "lint-class only".
+
 ## wiki/lessons/_raw.jsonl format
 
 Append-only stream of insights. One JSON object per line. Schema:
