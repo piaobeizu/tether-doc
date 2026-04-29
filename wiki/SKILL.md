@@ -10,6 +10,8 @@ status: scaffold + Phase 1 path migration shipped (v0.16+); ingest / lint / log 
 
 This file is the contract that polyforge agents and humans editing this repo MUST follow. Violations are surfaced by `polyforge:doc-lint` once it ships (Phase 2).
 
+> ⚠️ **Local additions not yet upstreamed** — this file has been edited beyond the polyforge plugin's `wiki-skill-template.md`. Specifically: §"Cross-repo references" and §"Immutability exception — lint-class mechanical rewrites" are local. Running `/polyforge:doc-init --force` will rewrite this file from the upstream template and back the live version up to `wiki/SKILL.md.bak-<ts>` — diff before accepting. The proper fix is to upstream these additions to the polyforge plugin's `wiki-skill-template.md`; tracked in `wiki/lessons/_raw.jsonl` (key: `local-skill-md-additions-need-upstream`).
+
 ## 4 layers — what lives where
 
 | Layer | Dir | Author | Mutability |
