@@ -374,10 +374,32 @@ func (s *Session) Recover(ctx context.Context) error {
 
 ### 10.3 凭据注入路径（ANTHROPIC_API_KEY / OAuth）
 
-- per-pod k8s Secret + env var？
-- 用户在 tether app 登录 → daemon 获取 token → 注入子进程 env？
-- vault？
-- **依赖 Epic #5 / 部署 ticket**，本 spec 不定稿；spike 阶段用本地 OAuth 即可。
+**v0.1 决策（locked）：env-var 透传 via `SpawnOpts.Env map[string]string`**
+
+`internal/backend/claude/spawn.go` 的 `Spawn()` 接受 caller 提供的 env override map，merge 到 `os.Environ()` 上传给 cc 子进程。Library 不强加任何凭据存储策略 —— **caller decides**：
+
+| 部署形态 | caller 怎么填 SpawnOpts.Env |
+|---|---|
+| 本地 spike / 开发 | 父进程已 export `ANTHROPIC_API_KEY` → caller 直接 `Env: nil`（继承父 env）或显式传一份 |
+| daemon (post-v0.1) | daemon 启动时从 k8s Secret / vault / OAuth 拿到 token → 每 spawn 时构造 `Env: {"ANTHROPIC_API_KEY": <token>}` |
+| 测试 / sandbox | 显式传特定 key 集合，library 不污染父 env |
+
+**为什么 library 不管存储**：spec §10 整体是"library 边界"。凭据来源（user OAuth flow、Secret 系统、token 轮转策略）是部署 + daemon 的事，library 只暴露注入点。这跟 §A.5 stderr drain 的设计哲学一致 —— 提供 mechanism，policy 留给 caller。
+
+**v0.2+ deferred：OAuth flow + secret store + token rotation**
+
+下一阶段 daemon 实现时，会在 daemon 内部实现：
+- 用户首次连 daemon → OAuth flow → 拿到 token
+- daemon 把 token 安全存（vault / k8s Secret / 加密磁盘文件，方案 TBD with Epic #5）
+- daemon 每次为某个 cc session spawn 时，从存储里解出 token → 填 SpawnOpts.Env
+- token 接近 expiry 时主动 refresh + 重 spawn（或调用 `Session.Recover()` 时刷新）
+
+这些工作**全部 daemon-side**，library 的 `SpawnOpts.Env` 形状不变 —— 这是 forward-compatible 的核心。
+
+**实施细节**：
+- 实现 PR：piaobeizu/tether#21（task slug=creds-injection）
+- 单测：`internal/backend/claude/env_test.go`（effectiveEnv 7 case）
+- backwards-compat：`Env: nil` 等价于历史行为（cmd 继承父 env 不变）
 
 ### 10.4 cwd 策略二选一定稿
 
