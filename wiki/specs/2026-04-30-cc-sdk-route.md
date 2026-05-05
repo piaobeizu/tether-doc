@@ -171,25 +171,45 @@ CC 的交互模式 slash 命令（`/init`, `/login`, `/clear`, `/config`, `/mcp`
 
 第一条事件就拿到 sid，记到 `Session` 结构里。
 
-### 4.4 Session.Recover() 统一抽象
+### 4.4 恢复原语：Type A re-spawn + Type B resume
+
+库提供两条互补的恢复路径，按 caller 上下文挑用。详细的 4-caller 分配见 §D.2；这里给 API 形态。
+
+**Type A — `Session.Recover(ctx)`**：同进程内 Session 已存在、子进程要换掉的场景（plugin reload / WT 重连且 Session 不健康）。
 
 ```go
-type Session struct {
-    SessionID string
-    ProjectCwd string
-    // ...
-}
-
-// Recover 是所有"断开重连"场景的唯一入口。
-// 调用方：plugin reload / pod restart / daemon crash 重启 / WT 重连。
-// 前置约束：必须满足 §6.C.1–C.5 五条护栏。
+// Recover replaces the underlying cc subprocess with a fresh one resuming
+// the same session_id. Honors §6.C.1–C.6 gates inline.
+//
+// Errors: ErrUnsafeToReload (gate closed) / ErrSessionNotStarted /
+// ErrSessionClosed / ErrOOMCircuitOpen / wrapped spawn errors.
 func (s *Session) Recover(ctx context.Context) error {
-    // 1. 杀掉残留子进程（如果有）
-    // 2. spawn claude --resume s.SessionID 在 s.ProjectCwd
-    // 3. 等 system/init，校验 session_id 一致
-    // 4. 恢复 stream 推送给 WT 客户端
+    // 1. 检查 OOM circuit-breaker (s5 ops-concerns)
+    // 2. 探活 + SIGKILL 残留子进程（如果还活着）
+    // 3. AbortPending 所有 control_request（§C.6）
+    // 4. WaitOnce 拿 exit code + 归因 OOM event（如果 SIGKILL 来自 OOM-killer）
+    // 5. spawn 新子进程 with --resume s.SessionID 在 s.ProjectCwd
+    // 6. 替换内部 sub/control/parserCh 等指针；events channel 不变
+    // 7. 重启 dispatch + drainStderr goroutine
 }
 ```
+
+**Type B — `claude.New(ctx, SpawnOpts{SessionID: sid, ...}, auth)`**：fresh 进程没有内存 Session，从外部存储拿到 session_id 后起新 Session（pod restart / daemon crash recovery）。**不是 Recover**，是 `New` —— 但 cc binary 看到 `--resume <sid>` 仍然恢复同一对话。
+
+```go
+// 用例：daemon 启动时扫描 ~/.claude/projects/，对每个要恢复的 session：
+sess, err := claude.New(ctx, claude.SpawnOpts{
+    SessionID:  sid,             // 触发 cc --resume <sid>
+    ProjectCwd: cwd,             // 必须跟 sid 当时的 cwd 一致
+    BinaryPath: "/usr/bin/claude",
+}, auth)
+if err != nil { /* ErrBinaryNotFound / spawn 失败 */ }
+if err := sess.Start(ctx, "<first user msg or noop>"); err != nil {
+    /* ErrInitTimeout / context cancel */
+}
+```
+
+**两者共用 §6.C.1–C.6 护栏**。Type A 在 `Recover()` 内显式实现；Type B 由 caller 在调 `New` 前自己保证（典型：等用户显式 reconnect 才起，不在 daemon 启动瞬间盲 spawn）。
 
 ### 4.5 控制协议（双向 control_request / control_response）
 
@@ -237,7 +257,57 @@ func (s *Session) Recover(ctx context.Context) error {
 ### D. 部署 & 持久化
 
 - **D.1** **JuiceFS 持久化路径清单**：`~/.claude/projects/`、`~/.claude/plugins/`、`~/.claude/auth/`、`~/.claude/settings.json`。其它 `~/.claude/*` 路径若 spike 阶段发现新增依赖，加入此清单。
-- **D.2** **Session.Recover() 是统一恢复原语**。plugin-reload、pod-restart、daemon-crash、WT-reconnect 全部走同一入口，共用 C.1–C.5 护栏。
+
+- **D.2** **恢复原语：库提供两条互补路径，4 callers 按场景挑用**。
+
+  原 D.2 描述"4 callers 全部走 Session.Recover() 同一入口"在概念上对（都是恢复一个已存在的 cc session），但**库实现上有两条 primitive**，按 caller 上下文（in-process vs fresh-process）选择。
+
+  | Primitive | 用途 | 调用形式 |
+  |---|---|---|
+  | **Type A — in-process re-spawn** | 同一 Go 进程已有 `*Session` 在内存里，子进程要换掉 | `sess.Recover(ctx)` |
+  | **Type B — out-of-process resume** | 新 Go 进程，没有内存 Session；只有外部存储里的 `session_id` | `claude.New(ctx, SpawnOpts{SessionID: sid, ...}, auth)` |
+
+  两者**共用 §C.1–C.6 护栏**（A 显式实现于 `Recover()`；B 由 caller 在调 `New` 前自己 enforce —— 例如 fresh process 启动后 caller 应等用户主动 reconnect 才 spawn）。
+
+  **D.2.1 — Plugin reload (Caller 1, Type A)**
+
+  - **Trigger**：用户在 tether app UI 点 "重载会话"（或任何 plugin/skill 配置变化要求 cc 重读）
+  - **触发面**：tether daemon（in-process）收到 UI 信号 → 在当前 Session 上调 `Recover(ctx)`
+  - **Gate**：`Recover()` 内置 §C.1（result-after gate）+ §C.2（tool-pair complete）+ §C.3（mid-stream forbidden）+ §C.5（成本警告 → 由 daemon emit `RecoveryStarted` 事件，UI 渲染由 Epic #6）+ §C.6（abort pending control_request）
+  - **Library status**：✅ 完全实现（`Session.Recover()` + 35 单测 + `TestSession_Recover_RealClaude_Scenario5` e2e 验证）
+  - **Daemon-side TODO**（post-v0.1）：UI 信号通道、`RecoveryStarted/RecoveryCompleted` 事件 emit、UX feedback 协议（§C.5）
+  - **错误路径**：`ErrUnsafeToReload`（gate 关闭）/ `ErrSessionNotStarted` / `ErrSessionClosed` / `ErrOOMCircuitOpen`（v0.1 ops-concerns）
+
+  **D.2.2 — Pod restart (Caller 2, Type B)**
+
+  - **Trigger**：k8s SIGTERM → daemon 优雅关闭（每个 Session 调 `Close()`，**不**调 Recover）；新 pod 启动后 daemon 进程是全新的，没有内存 Session
+  - **触发面**：新 daemon 启动时扫描 `~/.claude/projects/` 拿到所有 session_id，等用户从 client 重连（每个 user 在 client 选要继续的 session）→ daemon 调 `claude.New(ctx, opts{SessionID: sid, ProjectCwd: ...}, auth)` 起一个新 Session 接管
+  - **Library 用的是 Type B**（New + `--resume <sid>`），**不**是 Session.Recover()
+  - **Gate**：fresh process 没有 mid-stream / pending tool 状态可言（§C 护栏对 Type B 的体现是"等 user 显式 reconnect 才 spawn"，由 daemon 实施）
+  - **Library status**：✅ 完全实现（`SpawnOpts.SessionID` 已经触发 `--resume` flag，参考 `BuildArgs`；任何调用 `New(opts{SessionID})` 即得到 Type B 行为）
+  - **Daemon-side TODO**：startup 扫描逻辑、user-reconnect 协议、stub-session 过滤（参考 §E.3 follow-up #5）
+  - **错误路径**：`ErrBinaryNotFound`（claude 不在 PATH）/ `ErrInitTimeout`（cc 没在 InitTimeout 内吐 system/init，常见原因：cwd 错 + session 不在该 cwd 下）
+
+  **D.2.3 — Daemon crash recovery (Caller 3, Type B)**
+
+  - **Trigger**：tether daemon 意外退出（panic / OOM / 被 kill）→ 进程监督者（systemd / k8s / supervisord）自动重启 daemon 二进制
+  - **触发面**：与 D.2.2 相同 —— 新进程没内存 Session，走 Type B（New + --resume）
+  - **跟 D.2.2 唯一区别**：trigger 是 unexpected 而非 planned；语义对 library 完全一样
+  - **Library status**：✅ 同 D.2.2
+  - **Daemon-side TODO**：crash detection / supervisor 配置 / restart 频率限速（防止崩溃-重启循环）
+
+  **D.2.4 — WT reconnect (Caller 4, Type A 多数 / 偶 Type B)**
+
+  - **Trigger**：用户的设备网络重连，WT transport（Epic #16）通知 daemon 客户端回来了
+  - **触发面**：daemon 仍在运行，Session 在内存里。daemon 验证 Session 健康（`Session.SessionID() != "" && Session.State() != ...`）：
+    - **Session 健康** → 直接续推 `Events()` 流给客户端，**不调 recovery primitive**（最常见路径）
+    - **Session 不健康**（subprocess 死了 / state 卡住）→ 调 `Session.Recover(ctx)`（Type A）
+    - **Session 已 Close 了**（极端：daemon 因 idle 把 Session GC 掉了）→ 调 `New(opts{SessionID: sid})`（Type B）
+  - **Library status**：✅ 三条路径库都支持
+  - **Daemon-side TODO**：WT transport 集成、heartbeat / 健康检查协议、reconnect timeout 后是否 fallback to fresh resume 的策略
+
+  **小结**：库**已经完整提供**两条 recovery primitives + 各自的 gate + 错误码。剩下的全部是 daemon-side 工作（v0.2+）。本 ticket 完成度 = 把 §D.2 这一段 spec 写清楚 + 跟代码现状对齐 + 列 daemon-side TODO 路线图。
+
 - **D.3** **Container provisioning + cold-start optimization 显式 v0.1 out-of-scope**（见 §3）。
 
 ### E. Session 存储 & 生命周期
