@@ -40,6 +40,8 @@ Envelopes are fixed-layout big-endian, length-prefixed:
 [4B  ctLen BE][ciphertext...]
 ```
 
+**Identifier length bounds:** each `*Len` field is 2-byte big-endian, so each identifier (sessionId / fromId / toId) is bounded at **65535 bytes** of UTF-8. Encoder MUST reject longer values with an explicit error; decoder MUST reject malformed length frames (truncated input, length pointing past end of buffer). Go reference: `internal/crypto/xchacha20poly1305.go` `Marshal` / `UnmarshalEnvelope` enforce both.
+
 `ciphertext = XChaCha20Poly1305(session_key).Seal(nonce, plaintext, AD)` where AD is computed (NOT transmitted) as:
 
 ```
@@ -108,15 +110,50 @@ The crypto layer exposes a replay guard that the transport layer feeds with call
 
 Both Go and Rust sides MUST use identical (capacity, window) values to avoid desync under clock drift.
 
+**Transport-layer fields NOT in the inner envelope.** Two related fields named in master spec §11.C live at the **outer frame** (transport layer) and are NOT part of the `Envelope` struct in `internal/crypto/`:
+
+- **`envelopeId`** — a transport-layer UUID; replay guard consumes it via `ReplayGuard.Check(id, ts)`. Wire shape and uniqueness scheme are owned by the transport (e.g. `internal/wire/`); the crypto layer is agnostic.
+- **`ts`** (timestamp, server-visible metadata in §11.C) — also transport-layer, NOT serialized inside the §3 envelope wire format. The replay guard takes `ts` as a parameter for skew-window comparison; it does not embed `ts` in any AEAD-protected bytes.
+
+Rust implementers should treat envelope-id and ts as part of the OUTER protocol frame (alongside routing metadata), not as fields to add to §3's envelope layout.
+
 ## 7. Versioning policy
 
-`wireVersion=1` and `formatVersion=1` are reserved for v0.1. Any breaking change to layout, info-strings, or constants:
+There are **three independent version fields** in this layer; conflating them is the most common Rust↔Go interop hazard. Read this whole section before changing any version number.
 
-1. Bump the version field
-2. Increment `keyVersion` in fresh envelopes
-3. Old peers reject newer wire versions; new peers accept old wire formats only via a compat reader during a deprecation window
+### 7.1 `wireVersion` (envelope §3) — currently `1`
 
-`keyVersion` itself bumps on every session_key rotation — that's a separate counter from format version.
+Identifies the **envelope wire layout**. v0.1 is `wireVersion=1`. Bumps only on a structural change to §3 (e.g. adding/removing a length-prefixed field, changing the nonce size). On bump:
+
+1. Old peers reject newer wire versions outright.
+2. New peers MAY accept old wire formats via a compat reader during a deprecation window.
+
+### 7.2 `formatVersion` (keys.bin §4) — currently `1`
+
+Identifies the **keys.bin on-disk layout** (CLI/daemon-side persistence). Independent from `wireVersion` — keys.bin can rev without affecting the envelope wire and vice versa.
+
+### 7.3 Envelope `keyVersion` (envelope §3 + AD) — **fixed at `1` for v0.1**
+
+Master spec §11.C locks: **`keyVersion = 1` is constant for all v0.1 envelopes.** It bumps **only on a cryptographic algorithm or KDF context change** (e.g. swapping XChaCha20-Poly1305 for AES-GCM-SIV, changing an HKDF info string). It does **NOT** bump on `session_key` rotation.
+
+Why: rotating a session_key already invalidates prior envelopes (the new key cannot decrypt them); there is no on-the-wire signal of rotation, and Rust implementers must NOT increment envelope `keyVersion` on rotate or interop will break against Go.
+
+If you find yourself wanting to "tag" an envelope with which session_key version produced it, that's a routing concern at the transport layer, not a crypto-core invariant — handle it there, not by mutating envelope `keyVersion`.
+
+### 7.4 keys.bin internal `keyVersion` (§4) — local-only per-rotation counter
+
+The `keyVersion` field inside the keys.bin format (§4) **is** a per-rotation counter — it increments every time `SessionKey.Rotate()` writes to disk, so the daemon can validate "did this key load the latest material on restart?" against in-memory state.
+
+**This is local bookkeeping. It is NEVER on the wire** and Rust implementations of "shared keys.bin" (if/when that lands) MUST mirror Go's local-counter semantics rather than treating it as a wire-level identifier.
+
+### 7.5 Quick reference
+
+| Field | Where | Role | When to bump |
+|---|---|---|---|
+| `wireVersion` | envelope §3 | envelope wire layout | structural change to §3 |
+| `formatVersion` | keys.bin §4 | keys.bin on-disk layout | structural change to §4 |
+| envelope `keyVersion` | envelope §3 + AD | **algorithm / KDF context** | swap AEAD or HKDF info string. **NOT** on session_key rotation. v0.1 = `1` constant. |
+| keys.bin internal `keyVersion` | keys.bin §4 | local per-rotation counter | every `SessionKey.Rotate()`. Never on the wire. |
 
 ## 8. Out of scope (explicit)
 
