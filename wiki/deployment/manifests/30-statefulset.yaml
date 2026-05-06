@@ -1,0 +1,90 @@
+# 30-statefulset.yaml
+#
+# tether daemon as a 2-replica StatefulSet for the C'' verification
+# slice. Once verification passes, scale to replicas=1 (see
+# limitation #2 in juicefs-pv.md — no leader election yet).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tether
+  namespace: <NAMESPACE>
+  labels:
+    app: tether
+spec:
+  clusterIP: None  # headless — pod DNS = tether-0.tether.<ns>.svc / tether-1...
+  selector:
+    app: tether
+  ports:
+    - name: agent
+      port: 7820  # placeholder; the QUIC agent port is not in scope here
+      targetPort: 7820
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tether
+  namespace: <NAMESPACE>
+spec:
+  serviceName: tether
+  replicas: 2  # set to 1 after C'' verification passes
+  selector:
+    matchLabels:
+      app: tether
+  template:
+    metadata:
+      labels:
+        app: tether
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # Run the daemon as non-root. UID 65532 is `nonroot` in
+        # distroless; ensure the JuiceFS mount honours it (the CSI
+        # driver does, since it bind-mounts the FUSE handle directly).
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: tether
+          image: <TETHER_IMAGE>
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/etc/tether/entrypoint.sh"]
+          envFrom:
+            - configMapRef:
+                name: tether-env
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: data           # JuiceFS — shared across replicas
+              mountPath: /data
+            - name: run-tether     # pod-local — attach socket only
+              mountPath: /run/tether
+            - name: flags
+              mountPath: /etc/tether
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -S /run/tether/attach.sock"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tether-data
+        - name: run-tether
+          emptyDir:
+            medium: Memory
+        - name: flags
+          configMap:
+            name: tether-flags
+            defaultMode: 0o755
