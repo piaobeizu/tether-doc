@@ -1376,6 +1376,43 @@ Mobile App 通过 RPC `session-set-mode` 给 daemon 发模式切换请求。daem
 
 见 D-15（§2）。
 
+#### 11.D.1 `attach.lock-denied` frame shape ✅ **已锁定**
+
+当 rw-mode attach client（`tether attach <id>` 或未来的远程 attach 路径）尝试在 lock 被他人持有时写入 PTY 字节，daemon **不丢弃静默**——它在同一条 attach socket 上发回一条 length-prefixed JSON 帧，告诉发送方"为什么被拒 + 谁现在拿着 lock"。这条帧的 wire 形状对所有 attach client 实现（v0.1 的 raw-mode CLI；v0.1.x 的 mobile / 远程 attach）都是稳定契约。
+
+**何时 emit**：rw client 通过 attach socket 送来一个 input frame（`[4B BE length][payload]`，见 §11.U），daemon 调 `lock.TryAcquire(client)` 失败时（即 `errors.Is(err, ErrInUse)`，意味着另一个非过期 holder 在持锁）。**注意**：如果 lock 持有者是 client 自己（重复持有），TryAcquire 是 no-op，**不**发 lock-denied。
+
+**字段表**：
+
+| 字段 | 类型 | 取值 | 说明 |
+|---|---|---|---|
+| `type` | string | 恒等 `"attach.lock-denied"` | discriminator |
+| `reason` | string | 当前实现 = `"lock: held by another client"` | 来自 daemon 端 lock 错误的 `err.Error()`；client 用于日志/UI，**不**用作机器判定 |
+| `holder.kind` | string | `"terminal"` \| `"mobile"`（参考 `lock.KindTerminal` / `lock.KindMobile`） | 当前 lock holder 的 client 类别 |
+| `holder.deviceId` | string | per-pairing 稳定 ID（terminal 默认 `local-<unixnano>`） | 用于 UI 区分多设备 |
+
+**JSON 示例**（manual attach 与 mobile 抢锁时的典型实例）：
+
+```json
+{
+  "type": "attach.lock-denied",
+  "reason": "lock: held by another client",
+  "holder": {
+    "kind": "mobile",
+    "deviceId": "device-app-2"
+  }
+}
+```
+
+**Receiver 行为**（client 实现 must-do）：
+1. **Drop 该次 input** —— 这条 frame 对应的字节**已经**被 daemon 丢弃（不会进 PTY）；client 不应自己重发同一帧
+2. **Surface 给 user** —— terminal client 打到 stderr（如 `tether: input rejected — lock held by mobile/device-app-2`）；mobile / desktop UI 弹 toast 或 lock-status banner，含 holder 信息
+3. **Optionally retry via takeover** —— v0.1 **不实现**——`control.lock-takeover`（§3.3.2 control stream）在 v0.1 通过终端 `Ctrl+\ Ctrl+T` / mobile 二次确认按钮触发，但该路径走 daemon 的 control envelope 通道，**不**走 attach socket。attach socket 的 `ForceTakeover` 帧形状推迟到 v0.1.x 真有需求再 pin（见 `attach_socket.go::readInputs` 注释）
+
+**与 §3.3.1 wire envelope 的关系**：`attach.lock-denied` 是 **attach socket 内层帧**（length-prefixed JSON over Unix socket，§11.U），**不是** §3.3.1 的加密 envelope。原因：attach socket 在 v0.1 是本地可信 channel（0600 perm），不需要 envelope 加密层；而 lock-denied 必须立刻同步回当前 rw conn，跨 envelope 路由代价过高。当 v0.1.x 加远程 attach（U2）时，远程 attach 走的是加密 envelope 路径，到时另起一个 `control.lock-denied` envelope kind，**不**复用本帧。
+
+实现引用：`tether/internal/agent/attach_socket.go::LockDeniedFrame`（emit 点在 `readInputs` TryAcquire 失败分支）。
+
 ### 11.E Push 通知架构 ✅ **已锁定（E2 + Pusher 多态抽象，APNs/FCM）**
 
 **决定**：CLI 持 push 凭据 + 自己直接调推送服务 endpoint（**E2**），server 完全不参与 push。
