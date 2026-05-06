@@ -1,0 +1,52 @@
+# 00-storageclass.yaml
+#
+# JuiceFS-backed StorageClass + Secret schema for tether v0.1 dogfood.
+#
+# OPERATOR MUST FILL the placeholders below before `kubectl apply`.
+# The placeholders are intentionally string-literal so a missing
+# replacement fails loudly (e.g. JuiceFS will reject "<S3_BUCKET>" as
+# an invalid bucket name) instead of silently using a wrong default.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: juicefs-tether-secret
+  namespace: <NAMESPACE>
+type: Opaque
+stringData:
+  # Filesystem name as passed to `juicefs format`.
+  name: "<JUICEFS_VOLUME_NAME>"
+
+  # Metadata engine URL.
+  # Redis HA (Sentinel):  redis://:<password>@<sentinel-host>:26379/1?master=<master-name>
+  # TiKV:                 tikv://<pd1>:2379,<pd2>:2379,<pd3>:2379/jfs
+  metaurl: "<JUICEFS_META_URL>"
+
+  # Object storage backend.
+  # storage values: s3 | minio | r2 | gs | oss | ...
+  storage: "s3"
+  bucket: "<S3_BUCKET>"
+  # Set to your endpoint when not using AWS S3 default.
+  # MinIO example:  http://minio.minio.svc.cluster.local:9000
+  # R2 example:     https://<account>.r2.cloudflarestorage.com
+  # AWS:            leave empty or use https://s3.<region>.amazonaws.com
+  endpoint: "<S3_ENDPOINT>"
+  access-key: "<S3_ACCESS_KEY_ID>"
+  secret-key: "<S3_SECRET_ACCESS_KEY>"
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: juicefs-tether
+provisioner: csi.juicefs.com
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  csi.storage.k8s.io/provisioner-secret-name: juicefs-tether-secret
+  csi.storage.k8s.io/provisioner-secret-namespace: <NAMESPACE>
+  csi.storage.k8s.io/node-publish-secret-name: juicefs-tether-secret
+  csi.storage.k8s.io/node-publish-secret-namespace: <NAMESPACE>
+  # Mount options: enable file-mode preservation (matters for the C''
+  # check on lock.log being 0600 across the round-trip).
+  juicefs/mount-options: "writeback,cache-size=2048,attr-cache=1,entry-cache=1,dir-entry-cache=1"

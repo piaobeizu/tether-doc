@@ -1,0 +1,19 @@
+# 20-pvc.yaml
+#
+# Single RWX PVC backed by JuiceFS, mounted into all replicas of the
+# tether StatefulSet. RWX is non-negotiable for the C'' shared-state
+# check — the whole point is two replicas observing the same
+# ~/.claude/projects and the same ~/.tether/lock.log.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tether-data
+  namespace: <NAMESPACE>
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: juicefs-tether
+  resources:
+    requests:
+      storage: <PVC_SIZE>

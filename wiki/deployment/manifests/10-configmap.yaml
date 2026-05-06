@@ -1,0 +1,46 @@
+# 10-configmap.yaml
+#
+# tether daemon configuration. Two surfaces:
+#   1. tether-env — env vars consumed by the daemon (HOME redirect).
+#   2. tether-flags — daemon CLI flags assembled into an entrypoint script.
+#
+# Why two surfaces — env vars apply uniformly across PID 1 + any child
+# processes (e.g. claude binary spawned by the cc backend), while flags
+# are tether-daemon-only.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tether-env
+  namespace: <NAMESPACE>
+data:
+  # Reroutes ~/.tether and ~/.claude under /data (the JuiceFS mount).
+  # The daemon resolves both paths from $HOME with no env override —
+  # see cmd/tether/main.go:65-68 and internal/agent/attach_socket.go:55.
+  HOME: "/data"
+  # Shell PATH inside a minimal container; adjust if the image is fatter.
+  PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  # Make the daemon log verbosely during the C'' verification.
+  TETHER_VERBOSE: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tether-flags
+  namespace: <NAMESPACE>
+data:
+  entrypoint.sh: |
+    #!/bin/sh
+    set -eu
+
+    # Ensure the JuiceFS-rooted dirs exist with the right modes BEFORE
+    # the daemon writes the first JSONL / lock.log. The 0700 on .tether
+    # is what the C'' check verifies survived the round-trip.
+    mkdir -p /data/.tether /data/.claude/projects /run/tether
+    chmod 0700 /data/.tether
+    chmod 0700 /run/tether
+
+    exec /usr/local/bin/tether daemon \
+      ${TETHER_VERBOSE:+-v} \
+      --projects-dir=/data/.claude/projects \
+      --attach-socket=/run/tether/attach.sock
