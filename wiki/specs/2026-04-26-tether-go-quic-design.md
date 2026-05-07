@@ -2103,6 +2103,8 @@ v0.1 envelope `output.agent-event` plaintext 含 `providerType` 字段，**v0.1 
 
 **已评估并放弃**：[`tauri-plugin-web-transport` (kixelated)](https://github.com/kixelated/tauri-plugin-web-transport) —— 4-commit hobby 项目，"Maybe works fully?" 最后 commit，绑死 Tauri 2.5（我们要 2.10），零 Android 测试。详见 D-13 / review 2026-04-28 P1 #5 决议。
 
+**配对协议落点**：WT 拨通后，新设备的第一组 envelope 走 control channel (channel-id `0x01`) 跑配对 FSM——完整规范见 §11.AB / `2026-05-07-pairing-protocol.md`。配对完成前 envelope payload 不加密（`keyVersion: 0` 哨兵值，仅限 `kind: "pair.*"`）；完成后所有后续 envelope 走 §11.C 的 `wrap_key` → 每 session `session_key` 加密链。slice #4 实现配对，slice #3 envelope dispatch 临时写死 dev key + `TODO(pair)` 标记。
+
 ### 11.Y App surface model（桌面三栏 + 移动 chat-first） ✅ **已锁定（D-19）**
 
 **定位**：tether = **AI-generalized VS Code**。VS Code 把 IDE shell 通用化承载任意编程语言；tether 把 IDE shell 通用化承载**任意 AI 任务**。skill = "extension"——决定中栏内容 + chat 可用 verb。
@@ -2720,6 +2722,42 @@ func handleBlock(env *Envelope, blockType, skillName string) {
 **Companion spec 待补**：`2026-04-27-phase1-dag-protocol.md` §3 当前只定义 block payload schema，**未规范 fence tag**。本决议锁定后需在 companion spec §3 头部加一节 "Fence tag 语法扩展"，引用本节 §11.AA.1 作为权威定义；4 类 block 各自的示例（§3.1 / §3.2 / §3.3 / §3.4）的 fence tag 全部更新为 `<type>:<skill>` 形式。**这个 patch 在锁定后立即做（一次性 ~10 行 markdown 改动）。**
 
 **所有引用本协议的章节统一指向**：本节 §11.AA + `2026-04-27-phase1-dag-protocol.md §3`（block schema）+ companion spec `§3.5 / §4`（streaming + parser，v0.2 才完整，v0.1 整段路径足够）。
+
+### 11.AB Pairing protocol ✅ **锚定（v0.1 D-12 配对层完整规范，规范文档 = 2026-05-07-pairing-protocol.md）**
+
+**目的**：D-12 / §11.C 锁定 X25519 ECDH + XChaCha20-Poly1305 + HKDF 密码学栈，§11.J 锁定"无 token-family 简化版" auth；但**配对协议本身**（两台从未谋面的设备如何在 WT-over-HTTP/3 之上换公钥 + 防 MITM + 派生长期 key + 持久化设备记录）**完整规范在 companion spec** `2026-05-07-pairing-protocol.md`。本节是 **canonical reference anchor**，跟 §11.AA 同形式，给本文档其他章节统一引用。
+
+**v0.1 在 companion spec 内已完全锁定的内容**：
+
+| 部分 | 状态 | 引用 |
+|---|---|---|
+| Threat model（passive eavesdrop / active MITM during pair window / replay）+ 显式 out-of-scope（恶意持双机用户 / 配对后设备失窃 / TLS 链被攻破） | ✅ 完整 | §1 |
+| State machine（`idle / inviting / awaiting-pubkey / sas-confirm / completing / paired / failed`，初始者 + 响应者 + daemon-relay 三角色） | ✅ 完整（mermaid + 转移表） | §2 |
+| 5 个 frame schema（`pair.invite` / `pair.accept` / `pair.sas-confirm` / `pair.complete` / `pair.abort`）+ 完整 JSON 例 | ✅ 完整 | §3 |
+| SAS 算法（HKDF-SHA256 → 30 bits → 6-char base32，无视觉混淆字母表）+ pinned vectors 测试要求 | ✅ 完整 | §4 |
+| Transcript binding（JCS canonicalization + 长度前缀串接 → SHA-256） | ✅ 完整 | §5 |
+| Anti-replay（per-direction monotonic ts + per-state allowed-frame matrix + 16B nonce） | ✅ 完整 | §6 |
+| Timeouts（`awaiting-pubkey` 30s / `sas-confirm` 60s / `completing` 10s） | ✅ 完整 | §7 |
+| Long-term key 派生（`long_term_key` + `transport_binding_key` 双 32B HKDF info 标签固定） | ✅ 完整 | §8 |
+| 持久化（`~/.tether/users/<user>/devices/<deviceId>.json`，0600 / 目录 0700，atomic write） | ✅ 完整 | §9 |
+| Re-pair 语义（默认 `dup-deviceid` 拒绝；force-rotate CLI 路径 + audit 行 + per-session forward secrecy 保留说明） | ✅ 完整 | §10 |
+| Multi-user v0.2 forward-compat（v0.1 `userId="default"`） | ✅ 完整 | §11 |
+| `pair.abort` 7 个 reason 各 1 个 JSON 例 | ✅ 完整 | §12 |
+| Implementation pointers（`internal/agent/pair/` 包布局 + slice #3 dispatch hook） | ✅ 完整 | §13 |
+
+**v0.1 protocol 与 §11.C "QR 直扫 vs SAS fallback" 的关系**：companion spec §13 第 2 条 open question 给出推荐解法——QR 直扫**复用同一 FSM**（用 QR 当做 out-of-band 信道，在 FSM 里跳过 SAS 比对步骤），不分叉新协议。slice #4 锁定该解法或另议。
+
+**与 §11.D 审计日志的对齐**：pair 事件（`pair.completed` / `pair.aborted` / `pair.rotated`）写入同一份 `~/.tether/users/<user>/audit.log`（lock 事件已用），单一审计流。
+
+**Open design questions 待裁决**（companion spec §14，slice #4 实施前必须决断）：
+1. `transport_binding_key` v0.1.x 用法（TLS exporter binding / QUIC connection-id binding / null-on-disk-占位）
+2. QR 直扫是 FSM UX shortcut 还是独立短路径（推荐：UX shortcut）
+3. `deviceId` 格式是否 daemon 端强制 regex（推荐：`^device-(desktop|mobile)-[a-z0-9]{4,8}$`）
+4. Push token rotation：v0.1 走 re-pair，还是加 `pair.update-push` 轻量帧（推荐：v0.1 不做）
+
+**实现状态**：本节 + companion spec **是 spec only**。slice #3 envelope dispatch 仅落 `pair.*` kind 路由 stub + 写死 dev shared key 带 `TODO(pair)` marker；**slice #4 实现 companion spec 的全部行为**。
+
+**所有引用本协议的章节统一指向**：本节 §11.AB + `2026-05-07-pairing-protocol.md`（完整规范）+ §11.C（密码学原语）+ §11.J（post-pair auth token 层）+ §11.E（mobile push 注册时 pair 帧的 `pushSubscription` 字段）。
 
 ---
 
