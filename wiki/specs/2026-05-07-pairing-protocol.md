@@ -269,7 +269,7 @@ Step 2 — derive sas_bits:
 
 Step 3 — encode as 6-character base32:
   Encoding alphabet (RFC 4648 base32 minus visually-confusable chars):
-    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   // 32 chars; '0/O', '1/I/L' removed
+    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   // 32 chars; '0/O' and '1/I' removed (L is included)
   6 chars × 5 bits = 30 bits — encode high-to-low:
     char[0] = alphabet[(sas_30 >> 25) & 0x1F]
     char[1] = alphabet[(sas_30 >> 20) & 0x1F]
@@ -286,7 +286,7 @@ Output:
 
 **Why 30 bits.** ~1 in 10^9 collision probability per pair attempt; matches the SAS-strength target adopted by Signal / Matrix SAS verification. 6 base32 chars is the shortest form that hits this target while staying read-aloud-able and short-typeable.
 
-**Why the alphabet excludes 0/O/1/I/L.** Real-world device-name typos. SAS must be readable across screens of varying contrast / font.
+**Why the alphabet excludes 0/O/1/I.** Real-world device-name typos. SAS must be readable across screens of varying contrast / font. (NOTE: an earlier draft of this prose said "0/O/1/I/L removed", but the literal alphabet `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` does include `L`. Both implementations are byte-identical with the literal alphabet; the alphabet is the source of truth.)
 
 ## 5. Transcript binding
 
