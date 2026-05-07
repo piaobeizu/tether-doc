@@ -8,10 +8,13 @@ and-error on NDK / cargo / cc-rs interactions.
 ## Status
 
 Verified 2026-05-07 against:
-- NDK r26d
-- Rust 1.90 stable + `aarch64-linux-android`, `armv7-linux-androideabi`,
+- NDK **r29** (latest); also confirmed working with r26d / r27d / r28c.
+  Tauri 2 Mobile current recommendation is the r27 LTS line; r29 is the
+  bleeding-edge release and works fine.
+- Rust 1.95 stable + `aarch64-linux-android`, `armv7-linux-androideabi`,
   `x86_64-linux-android` targets
-- tether-app at commit on `main` past PR #22 (cross-stack pair fixes)
+- tether-app at commit on `main` past the 2026-05 dep-upgrade wave
+  (Tauri 2.11.1, RustCrypto 0.13/0.11 family, rand 0.10)
 
 All three targets `cargo check --lib` clean. Full deps tree compiles —
 ring, quinn, web-transport-quinn, chacha20poly1305, stronghold,
@@ -25,18 +28,18 @@ fits the headless-CI scope.
 
 | Tool | Min version | Why |
 |---|---|---|
-| Android NDK | r26 | provides per-target clang + llvm-ar; r26 is the LTS line. r25 also works but missing some C++23 headers ring may want post-1.x. |
+| Android NDK | r27 (LTS) or newer | provides per-target clang + llvm-ar. r27d is current LTS; r29 also works. r26 line works but is one LTS generation behind. |
 | Rust toolchain | stable + 3 targets | `aarch64-linux-android` is mandatory (modern phones); `armv7-linux-androideabi` for older 32-bit phones; `x86_64-linux-android` for emulator. |
 | Cargo | 1.74+ | `[env]` table inheritance, `linker = "<binary-on-PATH>"` resolution. |
 
 ## Setup (one-time per dev box)
 
 ```bash
-# 1. Install NDK
+# 1. Install NDK (r29 latest; r27d is current LTS — pick whichever)
 curl -L -o /tmp/ndk.zip \
-  https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+  https://dl.google.com/android/repository/android-ndk-r29-linux.zip
 sudo unzip -q -d /opt /tmp/ndk.zip
-export ANDROID_NDK_HOME=/opt/android-ndk-r26d
+export ANDROID_NDK_HOME=/opt/android-ndk-r29
 # (persist via ~/.bashrc or ~/.zshrc)
 
 # 2. Install Rust targets
@@ -110,7 +113,7 @@ Add to GitHub Actions / equivalent:
 ```yaml
 - name: Android cargo check (aarch64)
   env:
-    ANDROID_NDK_HOME: /opt/android-ndk-r26d
+    ANDROID_NDK_HOME: /opt/android-ndk-r29
   run: |
     rustup target add aarch64-linux-android
     source scripts/android-env.sh
