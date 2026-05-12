@@ -107,6 +107,25 @@
 
 ---
 
+### v0.4.x — UI design 落地
+
+**背景：** 存在一份完整的 Claude Design handoff（`memory/local/design-handoff-2026-05-06/`，2026-05-06），包含 5 个设计 frame + 完整 design token 体系，从未 apply 进代码。当前 SPA 是功能原型（50 行 CSS + system font + 4 个 11 行 fenced-block stub），视觉上不符合 D-19 spec 对产品形态的要求。
+
+**Scope：**
+- 引入 design token 体系（CSS custom properties：`--bg-*`、`--ink-*`、`--line-*`、`--accent`、`--r-*`，light-first + dark mode）
+- 切换字体至 Geist + Geist Mono（Zed/VS Code IDE vibe，匹配 Claude.ai 暖色调）
+- 实现 4 个真实 fenced-block 组件（DagFull/Compact、FormFull/Compact、CandidatesFull/Compact、MediaFull/Compact），替换当前 stub
+- 升级 WorkspaceTree（status dot、dirty dot、filter 搜索，IDE 风格）
+- 升级 ChatPane（slash-popover、status bar、provider selector 视觉）
+- 移动端 layout 完善（drawer + skill detail push）
+- Pair flow UI（QR + 6-char code，desktop initiator）
+
+**执行方式：** 使用 `applying-claude-design` skill apply handoff bundle。
+
+**K criteria touch：** K.2（D-19 视觉完成度）、K.3（fenced-block 真实渲染）、K.10 dogfood 体验前置
+
+---
+
 ### v0.5 — spec-complete + ship gate
 
 **Scope：**
@@ -146,6 +165,7 @@ s6 (PTY+lock+multi)      ─→    v0.2.0
 s5.5 (doctor)            ─→    v0.3.4 (pending)
                                 v0.3.x = MCP 轨道 (spec外)
                                 v0.4   = per-task MCP (spec外)
+                                v0.4.x = UI design handoff 落地 (spec外补完)
 s7 (workspace+skill)     ─→    ✅ (已完成，未单独版本)
 s8 (CI+contract tests)   ─→    ✅ (已完成，未单独版本)
 s9 (dogfood+ship gate)   ─→    v0.5 (K.8/K.9/K.10)
