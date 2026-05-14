@@ -208,3 +208,39 @@ claude (cc)     opencode       cursor          codex
 - [ ] `internal/agent/event.go` 定义 `Event` / `EventKind` / `ToolUseEvent`（**不被 tygo 生成**——这是 daemon 内部边界类型，不跨 daemon ↔ browser）
 - [ ] daemon 翻译层把 `Event` 转 `wire.Envelope` / `wire.FencedBlock`（生成 TS 类型）后发前端
 - [ ] 主 spec D-17 加一行链接到 D-17a，但不修改 D-17 锁定的"v0.1 仅 cc"承诺
+
+## 9. Addendum — opencode 实施漂移到 A1 (2026-05-14)
+
+§3.A2 把 opencode 归到「每 prompt spawn」模式，理由是 `opencode run --format
+json` 足以覆盖功能。但 v2 实施期发现：
+
+- `opencode run` 的 JSON 输出 **不包含 token-level 文本流**——只在 `message.part`
+  完成后整块给出文本。这跟 cc 用 `stream-json` 流式输出体验完全错位。
+- opencode 自带的 `serve` 子命令开了一个本地 HTTP 服务，`/global/event` SSE
+  endpoint **会**广播 `message.part.delta`（token 级文本增量），跟 cc 的
+  `assistant.content_block_delta` 体验匹配。
+
+所以 `internal/agent/opencode_provider.go` 实际走的是 §3.A1（长跑 serve +
+SSE）+ §3.A2（per-prompt `opencode run --attach <url>`）的混合：
+
+```
+[once per session]   spawn opencode serve --port <free>
+                     subscribe SSE: GET /global/event
+                     → message.part.delta → EventText
+                     → session.created    → EventInit
+
+[per user prompt]    spawn opencode run --attach <baseURL> "<prompt>"
+                     → goroutine 解析 stdout 捕获 session ID
+                     → cmd.Wait() 退出后 EventResult
+```
+
+**取舍**：
+- ✅ token-level streaming 跟 cc 对齐（dogfood: 20 chunks / 3 段文本，2026-05-14）
+- ✅ session 由 opencode serve 自管，跨 turn 自带 history
+- ⚠️ 启动多了 `serve` subprocess + 任意 free port — TOCTOU 窗口已通过
+  `serve.Wait()` 监控收紧（详见 opencode_provider.go::waitReady）
+- ⚠️ §3.A2 表里 opencode 行需要在下一次 spec revision 时勘误为 A1+A2 混合
+
+**为什么没在表里直接改**：D-17a v1 表述已固化在 v0.2.0 dogfood 备忘，跨多
+个 task 引用；改表会破坏对外文档稳定性，本 addendum 段在 v0.4.x cycle
+做一次合并。
