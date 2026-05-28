@@ -15,7 +15,7 @@ The tether-side counterpart to polyforge-v2's MCP integration spec. Defines:
 1. Why tether becomes an MCP host (not just a passive Claude Code wrapper)
 2. How tether exposes itself as an MCP server (the strategic value)
 3. The Go architecture for MCP host runtime
-4. Forward-compat changes that should land in v0.1 to avoid future breakage
+4. Forward-compat changes that should land early in v0.3 to avoid mid-implementation breakage (originally proposed for v0.1; v0.1+v0.2 already shipped without them)
 5. Integration points with existing tether internals
 6. Effort estimate, risks, acceptance criteria
 
@@ -36,7 +36,7 @@ Five capabilities are not achievable any other way:
 | **Workspace-aware env injection** | MCP servers don't know which task is active | tether substitutes `${TASK_ROOT}` / `${TASK_WORKSPACE}` per task |
 | **Unified permission gating** | Two parallel permission systems (Claude Code hook + nothing for non-Claude clients) | Single gateway for all tool calls regardless of source |
 | **Audit trail / event sourcing** | Tool calls vanish; no record | All tool calls written to Task history JSONL |
-| **Remote MCP exposure** | mobile / web clients cannot use MCP | tether's `/mcp` endpoint over HTTP+SSE, mobile-reachable |
+| **Remote MCP exposure** | mobile / web clients cannot use MCP | tether's `/mcp` endpoint via Streamable HTTP (MCP spec 2025-11-25), mobile-reachable |
 
 The fifth point is the strategic differentiation. **tether becomes a remote
 AI workspace accessible by any MCP client** — Cursor, Goose, Zed, future
@@ -63,7 +63,7 @@ tether (Go binary)
     │   ├── Permission gateway (generalized from D-05b)
     │   └── Audit hook → Task history
     │
-    └── /mcp endpoint over HTTP+SSE [NEW in v0.3]
+    └── /mcp endpoint via Streamable HTTP [NEW in v0.3]
         ↕
         Cursor / Goose / mobile app
 ```
@@ -198,7 +198,7 @@ tether/
         │   ├── manager.go         # MCP server lifecycle
         │   ├── server.go          # single MCP server abstraction
         │   ├── stdio.go           # stdio transport
-        │   ├── http_sse.go        # HTTP+SSE transport
+        │   ├── streamable_http.go # Streamable HTTP transport (MCP 2025-11-25)
         │   └── lifecycle.go       # spawn / health / restart
         │
         ├── protocol/
@@ -714,7 +714,7 @@ as the first work item of v0.3 (before MCP host implementation begins).
 
 - [ ] tether spawns configured MCP servers from `.workspace/config.json` MCP section
 - [ ] Stdio transport: bidirectional JSON-RPC, including notifications and progress
-- [ ] HTTP+SSE transport: same protocol semantics, alternate transport
+- [ ] Streamable HTTP transport (MCP 2025-11-25): same protocol semantics, alternate transport
 - [ ] Server crash → automatic restart with exponential backoff (max 3 attempts)
 - [ ] Server crash event written to Task history JSONL
 - [ ] Tool registry rejects name collisions at registration time
@@ -812,8 +812,8 @@ Recommended sequencing (current state: v0.1.0 + v0.2.0 shipped 2026-05-10):
 | **MCP client** | Process calling tools (Claude Code, Cursor, Goose, mobile app) |
 | **Aggregating proxy** | tether's role: many MCP servers internal, single `/mcp` external |
 | **Stdio transport** | MCP over subprocess stdin/stdout |
-| **HTTP+SSE transport** | MCP over HTTP with Server-Sent Events |
-| **Forward-compat change** | A v0.1 change made in anticipation of v0.3 needs |
+| **Streamable HTTP transport** | MCP over HTTP single POST endpoint per MCP spec 2025-11-25 (replaces deprecated 2024-11-05 HTTP+SSE dual-endpoint model) |
+| **Forward-compat change** | An early-v0.3 adjustment to v0.1/v0.2-shipped surface, made before MCP host work begins |
 | **Built-in tools** | tether's own capabilities exposed as MCP tools (vs. those from spawned servers) |
 
 ---
