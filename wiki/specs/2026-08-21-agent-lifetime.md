@@ -15,6 +15,16 @@
 > not a representative figure, and it is labelled as one everywhere it appears.
 > §5-C, §6, §6.0 and §7.4 are updated; **N is still not chosen**, and §7.4 says
 > why in three parts rather than being deleted. No code changed.
+>
+> **Revision, 2026-08-21 — tether#141, read against tether `9968aed`.** §2.8.4's
+> `[I]` is now `[M]`: **a single-pid SIGKILL of the agent — the daemon's actual
+> reaper — does reclaim all ~700 MiB of MCP children, in under a second, in both
+> authorised trials.** New §2.9. But it happens by *stdin EOF and a parent-pid
+> watchdog inside third-party servers*, not by kill scope, so §5-C's cap bounds
+> resident memory **conditionally on a property of the MCP server set that tether
+> neither enforces nor can observe** — and the same section proves the kill scope
+> genuinely cannot reach a grandchild. §2.8.4, §5-C and §7.4 are updated;
+> §2.8.3's `sessions/` disclosure is corrected. No code changed.
 
 ## How to read the claims
 
@@ -584,16 +594,253 @@ So on *that* path the agent shuts its MCP children down itself and nothing leaks
 **The daemon does not tear down that way.** Its reaper is
 `exec.CommandContext`'s default cancel — `Process.Kill()` against **one** pid,
 with no `SysProcAttr`/`Setpgid` (§2.5 fact 1 [R]) — which is precisely the scope
-that left the permission gate alive and reparented to init in §2.5 [M]. **[I]**
-Under the daemon's real reaper the agent's ~698 MiB of MCP children are
-therefore orphaned rather than reclaimed, and §1.5's `CHILDREN=0 ZOMBIES=0` is
-blind to it. That last part is not a guess: §2.5's own output shows the surviving
-gate process listed at `ppid=1` **on the same line as `CHILDREN=0`**, so that
-counter demonstrably counts the daemon's *direct* children only, and the agent's
-MCP servers are grandchildren of the daemon. **Not measured** — it needs a fourth
-real launch, which the quota budget did not cover. It is the single most valuable
-follow-up, because it decides whether a cap on live agents bounds resident memory
-at all: an eviction that leaves ~698 MiB behind is not a backstop.
+that left the permission gate alive and reparented to init in §2.5 [M].
+
+**This paragraph used to end in an `[I]`** — "under the daemon's real reaper the
+agent's ~698 MiB of MCP children are therefore orphaned rather than reclaimed".
+**tether#141 measured it and that inference is WRONG: they are reclaimed, in
+under a second. See §2.9.** The reasoning was sound about kill *scope* and wrong
+about *outcome*, because it stopped one hop short: nothing has to be in the kill
+scope for a stdio server to die — the dead agent's fds close, the servers' stdin
+pipes hit EOF, and they exit themselves.
+
+What survives from this paragraph unchanged is the part about the meter:
+§1.5's `CHILDREN=0 ZOMBIES=0` **is** blind to those processes, and that is not a
+guess — §2.5's own output shows the surviving gate process listed at `ppid=1`
+**on the same line as `CHILDREN=0`**, so that counter demonstrably counts the
+daemon's *direct* children only, and the agent's MCP servers are grandchildren of
+the daemon. §2.9 explains why that blindness still matters even though the
+outcome turned out benign.
+
+### 2.9 Single-pid SIGKILL **does** reclaim the MCP children — by EOF, not by kill scope
+
+Added 2026-08-21 by tether#141, read against tether `9968aed`. This closes
+§2.8.4's `[I]` and §7.4's third sub-bullet. **Two** authorised real launches, one
+character of prompt each.
+
+#### 2.9.0 The answer, first
+
+**All ~700 MiB comes back.** In both trials, every one of the agent's nine
+descendants was gone within **1 s** of a single-pid SIGKILL against the agent, and
+the resident memory they held went with them. Trial 2 additionally polled at 50 ms
+resolution, which puts the slowest of the nine at **0.866 s**; trial 1 had no fine
+poll, so it is only bounded to `(0.2 s, 1.0 s]` — consistent, and stated as a
+bound rather than borrowed from trial 2. [M]
+
+| | trial 1 | trial 2 |
+|---|---|---|
+| tree at rest, before the kill | **10 processes**, `VmRSS` **1,091,388 kB** | **10 processes**, `VmRSS` **1,063,384 kB** |
+| of which the agent process | 297,468 kB | 296,108 kB |
+| of which the 9 descendants | **793,920 kB** | **767,276 kB** |
+| still alive at **t+0.2 s** | 3 procs, **345,540 kB** | 3 procs, **322,024 kB** |
+| still alive at t+1 s | **0**, 0 kB | **0**, 0 kB |
+| still alive at t+5 / 15 / 60 / 120 s | 0, 0, 0, 0 | 0, 0, 0, 0 |
+
+**The two trials agree**, on the count, on the shape of the tree, and — see
+§2.9.3 — on *which three* processes are the slow ones. Per §2.4's lesson two
+trials was the floor, not a formality; they did not disagree, so there is no
+disagreement to report.
+
+#### 2.9.1 What the arm did, and the three things it deliberately did not do
+
+The reaper being reproduced is `exec.CommandContext`'s default cancel:
+`cmd.Process.Kill()`, i.e. `kill(<one pid>, SIGKILL)`, with `Spawn` setting no
+`SysProcAttr`/`Setpgid` (`claude_provider.go:161-176` [R]). So the arm is
+`os.kill(agent_pid, SIGKILL)` and **nothing else**:
+
+- **not** the process group — that is not what the daemon does, and it would have
+  answered a different question;
+- **not** a stdin close first — that is the *graceful* path §2.8.4 already
+  measured (30/30 gone), and mixing it in would have conflated the two;
+- **not** a pattern match, ever. Every process was recorded before the kill as
+  `pid` + `cmdline` + `/proc/<pid>/stat` field 22 start time, and every later
+  observation matched on **pid + start time**. This machine runs the owner's live
+  sessions with their own MCP children; a pattern would have swept those in, and
+  pids get reused. Nothing was signalled that was not both in a file this probe
+  wrote and confirmed live against `/proc/<pid>/cmdline` first.
+
+The agent was measured **at rest** — after `result/success`, back to blocking on
+stdin, with a draining thread on its stdout so it could never be blocked on a
+full pipe while being called idle.
+
+#### 2.9.2 The negative control — the kill scope really is one pid
+
+`SURVIVORS=0` from a checker that cannot see a survivor looks exactly like
+`SURVIVORS=0` from a clean reap. So the same driver, the same census, the same
+sampler and the same kill were run first against a **stand-in topology**: a
+parent that spawns four children on dedicated stdin pipes, three well-behaved
+(one of them with a grandchild of its own) and one **deliberately deaf to EOF**
+— it `dup2`s `/dev/null` over fd 0, so its copy of the pipe read end is closed
+and EOF can never reach it. Twice: [M]
+
+```
+>>> os.kill(51110, SIGKILL)  -- single pid, no process group, stdin NOT closed
+  pid=51111 gone    srv-a-wellbehaved
+  pid=51112 gone    srv-b-nested
+  pid=51115 gone    srv-b-nested-gk          <- grandchild, also EOF
+  pid=51113 gone    srv-c-wellbehaved
+  pid=51114 alive   ppid_now=1  rss_now=12324   srv-d-STUBBORN
+  ALIVE=1 ZOMBIE=0 GONE=5  at t+0.2s AND at t+1s, +5s, +15s, +60s, +120s
+```
+
+Three things this pins down, and none of them is decoration:
+
+1. **The sampler can see a survivor** — so §2.9.0's zeroes are real zeroes.
+2. **The kill scope is exactly one pid.** A child that does not choose to exit
+   is *not* killed by this signal; it is reparented to `ppid=1` and keeps its
+   RSS indefinitely. §2.8.4's structural reading was right.
+3. Therefore the real agent's children died **because they chose to**, not
+   because the kill reached them. That distinction is the whole content of
+   §2.9.4.
+
+#### 2.9.3 Per server, with the latency — because "gone" needs a *when*
+
+The work item asked for per-server reporting rather than an aggregate, and it was
+right to: the four servers do not behave the same. Trial 2 additionally polled
+every 50 ms from the instant of the signal, so the disappearance is a latency and
+not one in/out bit against a fixed wait — §2.4's lesson applied to a third
+quantity. Grouped by the MCP server each process belongs to: [M]
+
+| MCP server | process | `VmRSS` before (t1 / t2) | gone at (t2, ±50 ms) |
+|---|---|---|---|
+| **polyforge** (stdio, connected) | `…/polyforge/1.1.7/bin/polyforge` | 30,336 / 29,480 | **0.054 s** |
+| **codegraph** (stdio, connected) | `node /usr/bin/codegraph serve --mcp` | 45,332 / 45,324 | **0.054 s** |
+| | └ `…/codegraph-linux-x64/node --liftoff-only …` | 54,184 / 54,676 | **0.055 s** |
+| **chrome-devtools** (stdio, pending) | `npm exec chrome-devtools-mcp@latest` | 158,512 / 157,412 | **0.160 s** |
+| | └ `sh -c "chrome-devtools-mcp"` | 1,980 / 1,884 | **0.106 s** |
+| | └ └ `chrome-devtools-mcp` | 161,664 / 160,040 | **0.055 s** |
+| | └ └ └ `node …/telemetry/watchdog/main.js --parent-pid=<the one above>` | 152,708 / 151,544 | **0.866 s** ← slowest |
+| **atlassian** (stdio, pending) | `uv tool uvx --from mcp-atlassian mcp-atlassian` | 68,276 / 45,884 | **0.413 s** |
+| | └ `…/bin/python …/bin/mcp-atlassian` | 120,928 / 121,032 | **0.413 s** |
+| *(the agent itself)* | the provider, `2.1.237` | 297,468 / 296,108 | 0.002 s (it was the target) |
+
+A fifth server, **github**, is declared and reported `"status": "failed"` in the
+`system/init` line in both trials, so it contributed no process. The four that did
+are the same four §2.8.2 found, in the same nine-process shape. [M]
+
+**The three processes alive at t+0.2 s are the same three in both trials**: the
+`mcp-atlassian` pair and the `chrome-devtools-mcp` telemetry watchdog — 345,540 kB
+and 322,024 kB respectively, i.e. **about a third of the tree is still resident
+one fifth of a second after the kill**. That is the number a cap implementation
+has to care about, not the t+1 s zero:
+
+- **[I]** a cap that evicts and immediately admits a replacement will briefly hold
+  roughly (cap + 1) agents' worth of memory, for about a second. The gap named:
+  nothing here measured back-to-back eviction and admission; this is arithmetic on
+  the observed decay, not a measurement of it.
+
+#### 2.9.4 Why this is a **conditional** yes, and what the condition is
+
+The mechanism is **not** the kill. §2.9.2 proves the signal reaches one pid. What
+kills the children is what happens *after* the agent dies: the kernel closes the
+dead agent's fds, which are the write ends of each server's stdin pipe, the
+servers read EOF, and they exit. [I — from [M] on both arms: the same signal that
+cleared the real tree left the EOF-deaf stand-in child alive for 120 s. Gap named:
+no `strace`, so "it exited on EOF" is inferred from the contrast, not observed at
+the syscall.]
+
+And **at least two different third-party mechanisms** are doing that work, which
+is the reason to state the yes conditionally:
+
+- the fast six (54–160 ms) are consistent with a direct read of a closed stdin;
+- `mcp-atlassian`'s pair goes at 413 ms — the `uv` wrapper and its python child
+  hold the *same* pipe, and they go together;
+- the `chrome-devtools-mcp` **telemetry watchdog** goes last, at 866 ms, and it is
+  the one process in the tree whose own argv says it is not watching stdin at all:
+  `--parent-pid=<the chrome-devtools-mcp pid>`. It exits because it notices its
+  parent is gone, on its own polling period. [R on the argv, [M] on the latency.]
+
+⇒ **The reclamation is a property of the MCP server set, not of tether.** Every
+server on this machine happens to shut down on its own when the agent dies, by one
+of two mechanisms it chose for itself. tether does not require that, does not
+verify it, and — per §2.8.4 — cannot even see it, because these are the daemon's
+grandchildren and §4's invariant 3 (`CHILDREN=0 ZOMBIES=0`, the work item calls it
+§4.3) counts direct children only. One EOF-deaf or slow-draining server in
+someone's config, and the stand-in arm of §2.9.2 *is* what the daemon's reaper
+produces: an orphan at `ppid=1` holding its RSS until the box reboots, invisible
+to every counter this spec has.
+
+#### 2.9.5 The contrast with §2.8.4's stdin-close arm
+
+Same tree, same census, two different teardowns:
+
+| | §2.8.4 (tether#138) | §2.9 (tether#141) |
+|---|---|---|
+| what was done | **closed the agent's stdin** | **SIGKILL, one pid; stdin left open** |
+| who shuts the servers down | the agent, orderly, while alive | nobody — each server notices for itself |
+| is this what the daemon does? | **no** | **yes** — `exec.CommandContext`'s default cancel |
+| recorded pids surviving | 0 of 30 (3 trials) | **0 of 20** (2 trials) |
+| how long it took | not measured per process | **≤ 0.87 s**, per process in §2.9.3 |
+
+The step the difference comes from is **whether the agent gets to run any shutdown
+code at all**, and the finding is that on this machine it does not need to. The
+two arms agree on the outcome and disagree completely on the mechanism — which is
+exactly why measuring the graceful arm did not answer this question.
+
+#### 2.9.6 Deviations and disclosures
+
+- **The daemon was not in the loop**, for the same reason §2.8.3 gives: `buildEnv`
+  is `os.Environ()` plus `IS_SANDBOX` (`claude_provider.go:217-223` [R]), so the
+  agent inherits the daemon's `HOME`, and a daemon faithful enough to let the real
+  provider authenticate would have had to run with the owner's real `HOME` —
+  putting `~/.tether` in its write path. The spawn was replicated instead: argv
+  verbatim from `claude_provider.go:135-159`, `IS_SANDBOX=1`, cwd a probe
+  workspace, `TETHER_DAEMON_PERM_ENDPOINT` explicitly unset (so the PreToolUse
+  hook exits 2 before opening a socket, `cchook/hook_main.go.txt:23-26` [R] — and
+  both trials produced **0 bytes of stderr**, which that path always writes, so no
+  tool call occurred in either). **No daemon was started and no port was bound by
+  this work item at all**, which is a stronger statement than "a high port was
+  used". The owner's daemon was `pid=1912269` on `:443` and `127.0.0.1:8899`
+  before and after, with an unchanged start time — never restarted, never bound
+  over. [M]
+- **Why the daemon's absence does not weaken the result.** The quantity under test
+  is whether a grandchild of the daemon survives `kill(agent_pid, SIGKILL)`. The
+  agent's parent is not in that causal chain: the servers' stdin pipes are created
+  by the agent, and `Process.Kill()` is the same syscall from any parent. What a
+  real daemon would add — `TETHER_DAEMON_PERM_ENDPOINT`, and its own pipe on the
+  agent's stdin/stdout — touches the agent's own fds, not its children's.
+- **The provider inherited this session's own env**, including `CLAUDECODE`,
+  `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ID` and six more `CLAUDE*` keys,
+  because `buildEnv` is `os.Environ()` and the driver's own parent is a session of
+  the same provider. A daemon would not have those. Named because it is a plausible
+  cause of a config difference, and one showed up: see the next point.
+- **No connection to `127.0.0.1:8899` was observed.** §2.8.3 disclosed that the
+  provider connected read-only to the owner's live daemon's MCP loopback. In these
+  two trials the `system/init` line's `mcp_servers` list contains
+  `plugin:polyforge:polyforge`, `atlassian`, `chrome-devtools`, `github`,
+  `codegraph` — **no http/tether entry at all** [M]. So this probe has no evidence
+  of that connection, and did not otherwise look for it (no packet capture). This
+  is reported as a difference, not as a correction of §2.8.3: the env above and
+  any config change since are both unexcluded explanations.
+- **The provider wrote to its own config tree, and it was left in place.**
+  Accounted for by a full before/after listing of **names**, plus `stat` metadata
+  on the `sessions/` entries — **no file in either tree was opened**, nothing was
+  copied, and nothing was written, renamed, truncated or deleted by this probe.
+  `projects/`: 37 → 38, the one addition being `-root-tether141lab-ws`, keyed on
+  the probe's cwd, exactly as §2.8.3 describes. `sessions/`: **146 → 148, the
+  additions being `58058.json` and `72081.json`** — the probe's two agent pids.
+  Deleting either would itself have been a write to a read-only tree, so both were
+  left alone.
+- 🔴 **§2.8.3's `sessions/` disclosure is corrected.** It claims "**zero additions
+  under `sessions/`** — the latter checked by matching the three session ids this
+  probe minted against the 146 entry names, because 'the name does not contain
+  `probe138`' would prove nothing in a tree whose entries are named by session
+  id." **That tree's entries are not named by session id.** All 148 entries are
+  `<pid>.json`, and none of the 148 contains a session id [M]. So the check was
+  keyed on a field that does not appear in the data and could not have detected an
+  addition whatever happened; the 146 it quotes is the same 146 this probe measured
+  *before* its own run, so §2.8's own additions, if any, are inside it. The
+  correct form of the check is the full before/after name diff above. `stat` also
+  shows these are **live** files — one unrelated entry's mtime moved during this
+  probe's own run — so `sessions/<pid>.json` is per-process state written by
+  whatever instance is running, not a per-run transcript, and the count is
+  therefore not a stable baseline for anyone else's before/after either. The
+  general shape is worth keeping: **a negative check has to be keyed on the field
+  the data is actually keyed on, or it is a green light wired to nothing** — the
+  same failure mode as §2.8.1's "+12 goroutines for an agent that never started".
+- Two trials, not three. §2.4's lesson is that one is not enough; the work item
+  authorised two, they agreed, and the stand-in arm (which costs nothing) was run
+  twice as well.
 
 ---
 
@@ -746,11 +993,25 @@ longest-idle session with no subscribers and no turn in flight.
     a 2–4 GiB host it is 1–3. Expressing the cap as a reserved-memory figure
     rather than an integer is what makes it a safe backstop on hosts nobody has
     measured — which is exactly what this option claims to be.
-  - **Whether the cap bounds resident memory at all is still open**, because
-    §2.8.4 finds the daemon's reaper (`Process.Kill()` on one pid) cannot reach
-    the MCP grandchildren that are two thirds of that floor. Settle that before
-    choosing any figure: a cap that evicts sessions whose memory is never
-    reclaimed is not a backstop.
+  - **The cap does bound resident memory — conditionally.** This was open until
+    tether#141 measured it (§2.9): a single-pid SIGKILL of the agent, which is
+    exactly the daemon's reaper, reclaimed **all** of the ~700 MiB of MCP
+    grandchildren in **under a second**, in both trials. So an eviction really
+    does give the memory back and the cap is a real backstop. Three riders,
+    all load-bearing for whoever writes the cap:
+    1. **The condition is a third-party property.** Nothing was killed except one
+       pid; the servers exited *themselves*, six of them on stdin EOF and one
+       (`chrome-devtools-mcp`'s telemetry watchdog) on a parent-pid poll. tether
+       does not require this, cannot enforce it, and per §2.8.4 cannot see it —
+       §4's invariant 3 counts direct children only. §2.9.2's stand-in shows what
+       one EOF-deaf server would produce: an orphan at `ppid=1` holding its RSS
+       until the box reboots. **If the cap is documented as a memory backstop, that
+       caveat belongs in the same sentence.**
+    2. **Reclamation is not instantaneous.** About a third of the tree
+       (322–346 MiB) was still resident 0.2 s after the kill. A cap that evicts
+       and immediately admits will briefly hold ~(N+1) agents' worth.
+    3. **It is still a floor** (§2.8.2), so N is still a reserved-memory figure
+       divided by a number that only moves up — not an integer.
 
 ### D. Explicit start/stop
 
@@ -833,11 +1094,16 @@ than it is.
   2.6 MiB + ~0.5 MiB/session on the daemon side. N is still **not** picked, for
   two named reasons rather than for want of any number: the floor is a floor and
   the representative figure needs quota the owner has not granted (§2.8.2), and
-  §2.8.4 finds the daemon's reaper cannot reach the MCP grandchildren that are
-  two thirds of the floor, so it is not yet established that a cap bounds
-  resident memory at all. What the floor **does** settle: the daemon's own
-  per-session cost is negligible, and N has to be written as a memory budget
-  rather than a portable integer (§5-C).
+  §2.8.4 had not established that a cap bounds resident memory at all. What the
+  floor **does** settle: the daemon's own per-session cost is negligible, and N
+  has to be written as a memory budget rather than a portable integer (§5-C).
+  **Update 2026-08-21 (tether#141):** the second of those two reasons is now
+  closed — §2.9 measures that the daemon's own single-pid SIGKILL reclaims **all**
+  ~700 MiB of MCP grandchildren in under a second, so a cap **is** a real memory
+  backstop. It does so because those servers exit themselves, not because the kill
+  reaches them, so the three riders in §5-C travel with any figure that gets
+  written down. N is still not picked; the remaining blocker is the representative
+  figure, i.e. quota.
 - **Whether §6 survives contact with a real browser.** §7.2 is the cheapest
   experiment that could overturn point 2 of §6, and it **has not been run** —
   this machine has no display server, so it needs a machine that has one. Until
@@ -966,8 +1232,15 @@ Listed because an honest gap is worth more than a confident guess.
      the four stdio MCP servers *this* machine configures, spawned per agent
      process and shared with nothing. A representative figure needs a
      representative MCP configuration, and nobody has said what that is.
-   - **Whether the daemon's reaper reclaims it** (§2.8.4). Measured only for a
-     graceful stdin close, which is not what the daemon does.
+   - ~~**Whether the daemon's reaper reclaims it** (§2.8.4). Measured only for a
+     graceful stdin close, which is not what the daemon does.~~ **Closed by
+     tether#141 — §2.9: it does, entirely, in under a second, on the daemon's own
+     single-pid SIGKILL path.** What replaces it is narrower and does not block
+     choosing N: **the reclamation is the MCP servers' own doing, not the kill's**,
+     so it holds for *this* machine's server set and is neither required nor
+     observable by tether (§2.9.4). Whether any server anyone actually configures
+     fails to exit is unmeasured and unmeasurable from here — it is a property of
+     other people's machines.
    ⇒ **N can now be bounded, but still not chosen** — see §5-C for the shape the
    floor forces on it (a memory budget, not an integer) and §6.0 for what the
    owner has and has not decided.
@@ -1066,3 +1339,66 @@ COUNT=0 MATCHING=sleep 30
 
 The owner's daemon was `pid=1912269` on `:443` and `127.0.0.1:8899` before and
 after, i.e. never restarted and never bound over.
+
+## Appendix C — reproducing §2.9 (tether#141)
+
+Harness outside the repo and not committed; §2.9.1–2.9.6 describe it completely
+enough to rebuild. **No daemon was started and no port was bound**, so the port
+half of the envelope is vacuous here rather than satisfied — see §2.9.6 for why
+the daemon is not in the causal chain. The rest of the envelope held: never
+`:443`, never `/root/.tether`, no `pkill -f`/`pgrep -f`, no file opened under the
+provider's `projects/` or `sessions/`, nothing deleted from either. Four pieces:
+
+- one driver used for **both** arms, so the census, the kill and the sampler are
+  literally the same code in the control and in the measurement;
+- the stand-in topology of §2.9.2, whose fourth child `dup2`s `/dev/null` over
+  fd 0 and is therefore structurally incapable of seeing EOF — the negative
+  control;
+- a survivor checker keyed on **recorded pid + `/proc/<pid>/stat` field 22 start
+  time**, never on a name or pattern;
+- a reaper that will only signal a pid it finds in one of the probe's own JSON
+  census files, and only if that pid's start time still matches.
+
+Coarse sample grid `t+0.2 / 1 / 5 / 15 / 60 / 120 s` in every run; trial 2 and
+both stand-in runs additionally polled every 50 ms for the per-process latency in
+§2.9.3. Trial 1 had no fine poll, so its latency is only bounded to
+`(0.2 s, 1.0 s]` — consistent with trial 2's 0.866 s maximum.
+
+Three zeroes are claimed, so three controls:
+
+| The zero being claimed | Its control | Result |
+|---|---|---|
+| "no descendant survived the SIGKILL" | the EOF-deaf stand-in child, killed by the same code | `ALIVE=1` at every sample, `ppid=1`, 12,324 kB held — twice |
+| "no probe process is left" | start a `sleep 30`, census, reap, census again | `COUNT=1` → `COUNT=0`, and the pid+start-time checker `alive` → `gone` |
+| "the recorded pids are all gone" | the same checker that reported the stand-in survivor | `RECORDED_TOTAL=32 SURVIVORS_TOTAL=0` |
+
+Final state:
+
+```
+=== recorded pids, matched on pid + /proc start time
+   real.t1.samples.json        recorded=10  survivors=0
+   real.t2.samples.json        recorded=10  survivors=0
+   standin.dry1.samples.json   recorded=6   survivors=0     (control reaped by hand)
+   standin.dry2.samples.json   recorded=6   survivors=0     (control reaped by hand)
+   RECORDED_TOTAL=32 SURVIVORS_TOTAL=0
+=== read-only substring census on this work item's own lab path
+   COUNT=0 MATCHING=<lab dir>
+   COUNT=0 MATCHING=standin_
+   COUNT=0 MATCHING=driver.py
+=== positive control: the census CAN see a process
+   pid=86143 ppid=86141 state=S cmd=sleep 30
+   COUNT=1 MATCHING=sleep 30      status_of(control) = alive
+=== control ended; recheck
+   COUNT=0 MATCHING=sleep 30      status_of(control) = gone
+```
+
+⚠️ One harness note worth keeping, a level up from tether#134's "the census
+matched itself": the first run of that census reported `COUNT=1` on the lab path
+and the hit was **the invoking shell**, whose command line contained the path.
+The census skips its own pid, not its parent's. Re-invoking it by a command whose
+text does not contain the lab path gave `COUNT=0`. Both are quoted here because
+"the census counted the thing that launched it" is a different bug from "the
+census counted itself", and only one of them is fixed by `skip os.getpid()`.
+
+The two stand-in control survivors were killed by hand afterwards, by recorded
+pid with a start-time check, and `AFTER-REAP-ALIVE=0` in both cases.
