@@ -7,6 +7,14 @@
 > experiment that could overturn §6 has not been run (§7.2).
 > Work item: tether#134. Read against tether `5f96f7f` (`#211`/`#212`/`#213` landed).
 > Measurements taken 2026-08-21 against a purpose-built isolated daemon, never the owner's.
+>
+> **Revision, 2026-08-21 — tether#138, read against tether `4536b9c`.** §7.4's gap
+> is half closed: **§2.8 measures a FLOOR for the resident cost of one live agent**
+> (1.015 GiB per agent process tree; 2.6 MiB + ~0.5 MiB/session on the daemon
+> side) using the three real agent launches the owner authorised. It is a floor,
+> not a representative figure, and it is labelled as one everywhere it appears.
+> §5-C, §6, §6.0 and §7.4 are updated; **N is still not chosen**, and §7.4 says
+> why in three parts rather than being deleted. No code changed.
 
 ## How to read the claims
 
@@ -378,6 +386,215 @@ survive a chat reload with their consumer intact.** [I from [R]] Only the
 agent-spawned gate path has the dead-consumer problem. Any fix must not treat
 the two as one case.
 
+### 2.8 The resident cost of one live agent — a FLOOR, and the daemon's share
+
+Added 2026-08-21 by tether#138, read against tether `4536b9c`. This is §7.4, the
+one input §5-C's cap N has, and §7.4 is rewritten rather than removed because
+only half of it is now closed: **the floor is measured; the representative
+figure is not, and it needs the owner's quota.**
+
+#### 2.8.0 Why one number here is two numbers
+
+The cap is about what has to stay resident per live session, and that splits into
+a part tether owns and a part it only spawns:
+
+- **the daemon's own share** per live chat session — free to measure, because the
+  thing under the microscope is the daemon, so the §2.1 stand-in agent is a
+  perfectly good load;
+- **the agent process's own footprint** — costs real API quota, because a Python
+  stand-in's footprint says nothing about the real provider's (that is exactly
+  what §7.4 said).
+
+They came out **a factor of ~400 apart** — 2.6 MiB against 1,040 MiB — which is
+the finding.
+
+#### 2.8.1 The daemon's share — free, 3 trials per point [M]
+
+Harness as §2.1 (isolated `HOME`, high port, `--mcp-port` moved off 8899, no
+`pkill -f`/`pgrep -f`, stand-in agent on `TETHER_CC_PATH`), on port **19181**
+with `--mcp-port 19182`; the owner's live daemon was confirmed listening on
+`:443` and `127.0.0.1:8899` at the time and was never touched. Goroutines were
+counted from a `SIGQUIT` dump under `GOTRACEBACK=all` (`^goroutine \d+`
+occurrences), which is terminal, so each count is its own daemon run; RSS is
+paired *within* one run (baseline, then n live sessions) so run-to-run variance
+cancels.
+
+| Live chat sessions | goroutines (3 trials) | Δ daemon `VmRSS` (3 trials) | daemon fds | daemon OS threads |
+|---|---|---|---|---|
+| 0 | 20, 20, 20 (and 20, 20, 20 in the second batch) | baseline 18,696–18,988 kB | 9, 9, 9 | 7–9 |
+| 1 | **46, 46, 46** | **+2652, +2576, +2712 kB** | 12, 12, 12 | 10–13 |
+| 3 | **74, 74, 74** | **+3588, +3384, +3920 kB** | 18, 18, 18 | 11–13 |
+
+- **Goroutines: +14 per live session, exactly, with zero spread over 3 trials at
+  each point.** The other +12 is a one-off. Diffing the dumps by `created by`
+  site gives, per session: 2 × `agent.(*ClaudeCodeProvider).Spawn` (`readLoop`
+  and `guardStdout`), 1 × `session.(*Registry).spawnEntry` (`fanOut`), 1 ×
+  `server.serveChat` (`readPrompts`), 1 × `buildMux.handleWTChat.func10`, 1 ×
+  `os/exec.(*Cmd).Start`, and 7 in the transport (`quic-go.(*Conn).run`,
+  `baseServer.handleInitialImpl`, `http3.rawConn.handleControlStream`,
+  `webtransport-go.(*Server).Serve`, 3 × `ServeQUICConn`, `newSession`) — 14.
+  The remaining +12 is `runtime.gcBgMarkStartWorkers`, which equals GOMAXPROCS
+  on this 12-core box, appears when the first session makes the heap grow enough
+  to start a GC, and does **not** repeat.
+  **This decomposition was derived from the 1-session dumps and its consequence
+  — `20 + 12 + 3×14 = 74` — written down before the 3-session dumps were read.
+  All three came back 74.**
+- **RSS: not linear, and small.** First session ≈ **+2.6 MiB** (median 2652 kB);
+  sessions 2 and 3 cost ≈ **+0.5 MiB each** (medians: (3588−2652)/2 = 468 kB;
+  worst pairing of the observed extremes, 672 kB). Most of the first session's
+  cost is the one-off heap growth the 12 GC workers belong to.
+- **fds: +3 per session, exactly linear** (9 → 12 → 18). Consistent with cc's
+  stdin/stdout pipes plus one.
+- **OS threads are not a per-session constant** — they are the Go scheduler's
+  business and moved 7↔13 independently of n. Reported so nobody derives a rate
+  from them.
+
+**Positive control on the dump parser, and why it is not optional.** The three
+frames `fanOut` / `readLoop` / `guardStdout` are 0 at 0 sessions and exactly n
+at n sessions, in every trial. That control exists because the first attempt at
+this measurement produced a **+12 goroutine delta for a session whose agent had
+not started at all** — the stand-in was not executable, `Spawn` returned
+`permission denied`, and the transport goroutines alone moved the count. So a
+run is admissible only when the process census sees exactly n stand-in processes
+*and* those three frames appear exactly n times. Both were true for all six runs
+reported above. Without that gate this table would have had a plausible, wrong
+number in it.
+
+#### 2.8.2 The real agent's footprint — a FLOOR, 3 launches [M]
+
+**Three** real provider launches, the number the owner authorised, each with the
+shortest possible prompt — a single `.`. No attachment, no tool call, one turn,
+then measured at rest. Provider `2.1.237` (334,715,184 bytes on disk), resolved
+the way `internal/server/cc_resolve.go:19-22` resolves it [R] — `TETHER_CC_PATH`
+unset, so the `PATH` lookup, landing on
+`/root/.local/share/claude/versions/2.1.237`.
+
+Spawned with **the daemon's own argv, verbatim** from
+`internal/agent/claude_provider.go:135-159` — `--print --output-format
+stream-json --input-format stream-json --verbose --include-partial-messages
+--permission-mode default --session-id <minted uuid>` — with `IS_SANDBOX=1`
+(`buildEnv`'s rule as root, `:217-223`) and cwd set to a probe workspace.
+Measured at rest, i.e. after `result/success` arrived and the process went back
+to blocking on stdin.
+
+| | agent process alone | whole process tree (10 processes) |
+|---|---|---|
+| `VmRSS` | 353,632 / 342,316 / 321,736 kB → **median 334 MiB** | 1,064,540 / 1,056,700 / 1,092,268 kB → **median 1.015 GiB** |
+| `VmHWM` (peak) | 370,484 / 367,692 / 331,872 kB → median 359 MiB | 1,276,384 / 1,228,460 / 1,199,412 kB → median **1.171 GiB** |
+| fds | 31 / 32 / 32 (`ls /proc/<pid>/fd \| wc -l`: 31 / 31 / 32) | 170 / 170 / 170 — **spread 0** |
+| OS threads | 16 / 13 / 16 | 83 / 76 / 79 |
+| CPU at rest | — | **1.30% / 0.33% / 0.73%** of one core, 30 s window |
+
+CPU at rest is two `/proc/<pid>/stat` `utime+stime` reads summed over the tree,
+30 real seconds apart — not `top`'s instantaneous figure. Its own positive
+control: the same meter reads **0.00%** on a `sleep` and **92.3%** on a
+deliberate spin loop, so 0.33–1.30% is a real small number and not a broken
+meter. The three-fold spread across trials is why the range is reported and no
+mean is offered — §2.4's lesson applied to a second quantity.
+
+**The tree, identical in shape in all three trials.** The agent is not one
+process. It spawned four stdio MCP servers as **nine** child processes. Where
+each of the four is configured was not enumerated — `settings.json`'s
+`mcpServers` names exactly one server and it is *http* (the tether loopback), so
+the stdio set comes from the user/plugin config [M for the process list, [I] for
+which file declares each]:
+
+```
+agent                                          RSS 353,632 kB  fd 31  thr 16
+├─ uv tool uvx --from mcp-atlassian …           RSS  76,492 kB
+│  └─ …/bin/python …                            RSS 128,104 kB
+├─ npm exec chrome-devtools-mcp@latest          RSS  99,644 kB
+│  └─ sh -c chrome-devtools-mcp                  RSS   1,844 kB
+│     └─ chrome-devtools-mcp                      RSS 140,428 kB
+│        └─ node …/chrome-devtools-mcp/…           RSS 135,468 kB
+├─ …/polyforge/1.1.7/bin/polyforge              RSS  30,368 kB
+└─ node /usr/bin/codegraph serve --mcp          RSS  44,856 kB
+   └─ …/codegraph-linux-x64/…                    RSS  53,704 kB
+                                       tree total 1,064,540 kB   (trial 1)
+```
+
+Children alone: 710,908 / 714,384 / 770,532 kB → **median 698 MiB, about two
+thirds of the tree**, and it is **per agent process** — nothing here is shared
+between two live sessions.
+
+**Why this is a floor and not the number.** The prompt was one character; the
+transcript is one exchange; no file was attached and no tool ran. Everything a
+real session accumulates — a long transcript, file contents, tool results — adds
+to the agent process's own RSS, and none of it was present. The one-character
+turn nevertheless reported `input_tokens` 11,985–12,171 and
+`cache_read_input_tokens` 112,504–499,919, i.e. the system prompt and the tool
+definitions are already loaded at the floor; that is the part a representative
+measurement would *not* change much. **A representative figure is therefore
+strictly larger than these numbers, and by an amount this measurement cannot
+bound.**
+
+**What a representative measurement would need, and why it needs separate
+approval.** Several launches driven through a handful of real turns *with* tool
+calls and file reads, sampled at rest between turns — tens of minutes of model
+time per launch instead of the 85–170 s these three took (the quota actually
+spent: `output_tokens` 1,306 / 1,772 / 6,541, the largest including 3,499
+thinking tokens). And it has to be repeated against a **representative MCP
+configuration**, because 698 of the 1,040 MiB is MCP servers and that set is a
+property of the machine, not of tether.
+
+#### 2.8.3 Deviations, disclosed
+
+- **The daemon was not in the loop for the real-agent arm.** `buildEnv` is
+  `os.Environ()` plus `IS_SANDBOX` (`claude_provider.go:217-223` [R]), so the
+  agent inherits the daemon's `HOME` — there is no way to give the daemon an
+  isolated `HOME` and the agent the real one. A daemon run faithful enough to
+  authenticate the real provider would have had to run with the owner's real
+  `HOME`, putting `~/.tether` and `~/.claude/settings.json` in the daemon's own
+  write path. Replicating the spawn instead kept both out of it. What is
+  replicated (argv, `IS_SANDBOX`, cwd) is read from source; what is skipped is
+  the daemon's `cfg.Env` extra, which is `TETHER_DAEMON_PERM_ENDPOINT`
+  (`session/registry.go:999-1006` [R]) — and its absence is *safe by design*:
+  with it unset the PreToolUse hook exits 2 before opening a socket
+  (`cchook/hook_main.go.txt:23-26` [R]), so a tool call could not have reached
+  the owner's live daemon. No trial produced any hook output on stderr, which
+  that path always writes, so no tool call occurred in any of the three.
+- **The provider did connect to `http://127.0.0.1:8899/mcp`**, the loopback MCP
+  endpoint the owner's `settings.json` names, i.e. to the owner's live daemon.
+  That is a tool listing, it is read-only, and it is what a daemon-spawned agent
+  does — so it is fidelity, not contamination. Named because it is a real
+  interaction with a process this work item did not own.
+- **The provider wrote its own transcript.** Accounted for exactly, by listing
+  directory names only and opening no file: **one new project directory**
+  (`projects/-root-…-probe138-home-ws`, 7 entries, keyed on the probe's cwd,
+  37 project directories in total afterwards) and **zero additions under
+  `sessions/`** — the latter checked by matching the three session ids this probe
+  minted against the 146 entry names, because "the name does not contain
+  `probe138`" would prove nothing in a tree whose entries are named by session
+  id. Nothing pre-existing in either tree was written, renamed, truncated or
+  deleted, and the new directory was **left in place** — deleting it would itself
+  have been a write to that tree. (Incidental confirmation of the fake-agent
+  contract's fact ①: all three ids came back on `result` verbatim, so
+  `--session-id` is still adopted at `2.1.237`.)
+- The stand-in arm ran with `TETHER_NO_PERMISSION_HOOK=1` and
+  `--skip-mcp-inject`, as in §2.1.
+
+#### 2.8.4 The reaping caveat — and why §1.5's census cannot see it
+
+All three trials were torn down by **closing stdin**, the ordinary end of a
+stream-json session, and afterwards every one of the 30 recorded pids across the
+three trees was gone (checked by recorded pid plus `/proc/<pid>/stat` start time,
+never by pattern; a positive control confirmed the checker can see a live pid).
+So on *that* path the agent shuts its MCP children down itself and nothing leaks.
+
+**The daemon does not tear down that way.** Its reaper is
+`exec.CommandContext`'s default cancel — `Process.Kill()` against **one** pid,
+with no `SysProcAttr`/`Setpgid` (§2.5 fact 1 [R]) — which is precisely the scope
+that left the permission gate alive and reparented to init in §2.5 [M]. **[I]**
+Under the daemon's real reaper the agent's ~698 MiB of MCP children are
+therefore orphaned rather than reclaimed, and §1.5's `CHILDREN=0 ZOMBIES=0` is
+blind to it. That last part is not a guess: §2.5's own output shows the surviving
+gate process listed at `ppid=1` **on the same line as `CHILDREN=0`**, so that
+counter demonstrably counts the daemon's *direct* children only, and the agent's
+MCP servers are grandchildren of the daemon. **Not measured** — it needs a fourth
+real launch, which the quota budget did not cover. It is the single most valuable
+follow-up, because it decides whether a cap on live agents bounds resident memory
+at all: an eviction that leaves ~698 MiB behind is not a backstop.
+
 ---
 
 ## 3. The two consequences, separated
@@ -516,7 +733,24 @@ longest-idle session with no subscribers and no turn in flight.
   directory [M — `ls -1 | wc -l`, no file read] and the transcript store has 97
   files across 36 project directories [M]. **That is history, not concurrency,
   and it does not constrain the cap.** The cap needs the resident cost of one
-  live agent, which I did not measure (§7).
+  live agent, and §2.8 now measures a **floor** for it: **1.015 GiB resident per
+  live agent tree** (334 MiB of it the agent process itself, ~698 MiB its MCP
+  server children), against **2.6 MiB for the first session and ~0.5 MiB per
+  session after that** on the daemon side. **The daemon is not the constraint;
+  the agent is, by a factor of ~400.** Two consequences for how N is
+  written down:
+  - **N is not a constant, it is a memory budget divided by that floor.** At the
+    floor, a host that reserves *M* GiB for live agents supports N ≈ M / 1.02, and
+    the floor only moves up. On the machine these numbers came from (48,168 MiB
+    total, 35,314 MiB available at the time [M — `free -m`]) that is still tens; on
+    a 2–4 GiB host it is 1–3. Expressing the cap as a reserved-memory figure
+    rather than an integer is what makes it a safe backstop on hosts nobody has
+    measured — which is exactly what this option claims to be.
+  - **Whether the cap bounds resident memory at all is still open**, because
+    §2.8.4 finds the daemon's reaper (`Process.Kill()` on one pid) cannot reach
+    the MCP grandchildren that are two thirds of that floor. Settle that before
+    choosing any figure: a cap that evicts sessions whose memory is never
+    reclaimed is not a backstop.
 
 ### D. Explicit start/stop
 
@@ -594,6 +828,16 @@ than it is.
 - **T (the idle-eviction interval) and N (the cap).** §6.5 stands: neither is
   picked here. N specifically **cannot** be picked yet — it needs §7.4, the
   resident cost of one live agent, which is filed as its own measurement task.
+  **Update 2026-08-21 (tether#138):** that task ran and §2.8 measures a **floor**
+  — 1.015 GiB per live agent tree, 334 MiB for the agent process alone, against
+  2.6 MiB + ~0.5 MiB/session on the daemon side. N is still **not** picked, for
+  two named reasons rather than for want of any number: the floor is a floor and
+  the representative figure needs quota the owner has not granted (§2.8.2), and
+  §2.8.4 finds the daemon's reaper cannot reach the MCP grandchildren that are
+  two thirds of the floor, so it is not yet established that a cap bounds
+  resident memory at all. What the floor **does** settle: the daemon's own
+  per-session cost is negligible, and N has to be written as a memory budget
+  rather than a portable integer (§5-C).
 - **Whether §6 survives contact with a real browser.** §7.2 is the cheapest
   experiment that could overturn point 2 of §6, and it **has not been run** —
   this machine has no display server, so it needs a machine that has one. Until
@@ -655,6 +899,17 @@ The reasoning, in the order it actually runs:
   2–3, at which point B+C stops being "sessions survive reloads" and becomes
   "the most recent two sessions survive reloads", and F alone might be the whole
   answer.
+  **This trigger is now met — at the floor, before any representative
+  measurement (§2.8.2, tether#138).** A started, connected, *idle* agent given a
+  one-character prompt is **334 MiB** on its own and **1.015 GiB** as the process
+  tree that actually has to stay resident. So the "hundreds of MB" branch is the
+  live one, and the qualifier the bullet hedged with — "with the model context
+  loaded" — turns out not to be needed to reach it. What that does **not** settle
+  is the direction of the conclusion, because the bullet quietly assumed a fixed
+  memory budget: at 1.02 GiB per agent, N is 1–3 on a 2–4 GiB host and still tens
+  on the 47 GiB box these numbers came from. ⇒ the honest form of this bullet is
+  not "N drops to 2–3" but **"N stops being a portable integer"**; see §5-C.
+  On the smaller hosts, F alone being the whole answer is exactly right.
 - **Evidence that the §2.4 long tail does not occur with a real browser** — i.e.
   that Chrome's WebTransport close is reliably observed and cancels
   `wtsess.Context()` promptly. That would restore A's determinism, remove the
@@ -688,9 +943,34 @@ Listed because an honest gap is worth more than a confident guess.
    a live agent. I did not construct a run where the reconnect lands *after* the
    reap and then check whether the replayed request is on screen before the user
    types. The work item's claim there remains [R].
-4. **The resident cost of one live agent.** The stand-in agent is a Python
-   process; its footprint says nothing about the real one. No RSS, no fd count,
-   no CPU-at-rest figure. **N cannot be chosen without this.**
+4. **The resident cost of one live agent — half closed, half still open.**
+   *Was:* "The stand-in agent is a Python process; its footprint says nothing
+   about the real one. No RSS, no fd count, no CPU-at-rest figure. N cannot be
+   chosen without this."
+   **Measured floor (§2.8, tether#138, 3 authorised launches):** a started,
+   connected, idle real agent given a one-character prompt is **334 MiB `VmRSS`**
+   as a process, **1.015 GiB** as the 10-process tree it actually is (median of
+   3; ranges in §2.8.2), **31–32 fds** on the agent and **170** across the tree,
+   and **0.33–1.30% of one core at rest**. The daemon's own share of a live
+   session is **+14 goroutines, +3 fds, +2.6 MiB for the first session and ~0.5
+   MiB for each one after it**.
+   **Still not established, and this is why the item is not deleted:**
+   - **The representative figure.** Everything above was taken at the smallest
+     context the process can hold — one character in, one turn, no attachment, no
+     tool call — so it is a lower bound and the gap to a working session's
+     footprint is unbounded by anything here. Closing it means driving several
+     launches through real turns with tool calls and file reads, which is **model
+     time the owner has to approve separately**; the three launches spent here
+     were the whole authorisation.
+   - **Whether that cost is per-machine or per-product.** 698 of the 1,040 MiB is
+     the four stdio MCP servers *this* machine configures, spawned per agent
+     process and shared with nothing. A representative figure needs a
+     representative MCP configuration, and nobody has said what that is.
+   - **Whether the daemon's reaper reclaims it** (§2.8.4). Measured only for a
+     graceful stdin close, which is not what the daemon does.
+   ⇒ **N can now be bounded, but still not chosen** — see §5-C for the shape the
+   floor forces on it (a memory budget, not an integer) and §6.0 for what the
+   owner has and has not decided.
 5. **Whether `--resume` ever recovers a turn that was mid-generation.** Read as
    "no" from what `--resume` is, but not tested: nothing here interrupted a
    *long* turn and then resumed. The stand-in agent's turns complete in
@@ -734,3 +1014,55 @@ COUNT=0 MATCHING=sleep 30
 
 The positive control is there because `COUNT=0` from a census that cannot see
 anything would look identical to `COUNT=0` from a clean machine.
+
+## Appendix B — reproducing §2.8 (tether#138)
+
+Same envelope, different ports: **19181** and `--mcp-port 19182`, isolated
+`HOME`, never `:443`, never `/root/.tether`, no `pkill -f`/`pgrep -f`. The
+harness is again outside the repo and not committed; §2.8.1–2.8.3 describe it
+completely enough to rebuild. The pieces:
+
+- the §2.1 stand-in agent, re-derived from `internal/agent/fakecc_test.go` at
+  `4536b9c` (per-turn order `system/hook_started` → `hook_response` → `init` →
+  `stream_event*` → `assistant` → `result/success`; nothing before the first
+  prompt; never exits on its own);
+- a `/wt/chat` client built from `poc/go-quic-wt/step2_client.go`'s shape — the
+  PoC module was **copied out of the repo** and built there, so nothing was added
+  to the tether tree (confirmed afterwards: `git status --short` empty, and the
+  `web/dist` stub the `//go:embed` needs was removed);
+- goroutine counts from `SIGQUIT` under `GOTRACEBACK=all`, diffed by
+  `created by` site so the answer is *which* goroutines, not just how many;
+- a process census that skips its own pid and its own script name, plus a
+  survivor check that matches **recorded pid + `/proc/<pid>/stat` start time**
+  rather than a pattern — this machine also runs the owner's live sessions with
+  their own MCP children, and a pattern would have swept those in.
+
+Three positive controls, because three different zeroes are claimed:
+
+| The zero being claimed | Its control | Result |
+|---|---|---|
+| "no probe process is left" | start a `sleep 30`, census, reap, census again | `COUNT=1` → `COUNT=0` |
+| "the idle agent uses ~0 CPU" | same meter on a deliberate spin loop | `0.00%` on `sleep`, **92.3%** on the spinner |
+| "the goroutine dump shows n sessions" | count `fanOut`/`readLoop`/`guardStdout` frames | `0` at 0 sessions, exactly `n` at n |
+
+Final state:
+
+```
+=== FINAL CENSUS: anything of mine left?
+COUNT=0 MATCHING=tetherd server
+COUNT=0 MATCHING=<probe>/standin
+COUNT=0 MATCHING=<probe>/bin/wtc
+COUNT=0 MATCHING=probe138
+=== real-agent trees: 30 recorded pids across 3 trees
+SURVIVORS=0
+=== positive control: the census CAN see a process
+pid=4101201 ppid=4101192 state=S cmd=sleep 30
+COUNT=1 MATCHING=sleep 30
+=== control ended; recheck
+COUNT=0 MATCHING=sleep 30
+=== port 19181/19182 listeners
+---END-portcheck (empty = free)---
+```
+
+The owner's daemon was `pid=1912269` on `:443` and `127.0.0.1:8899` before and
+after, i.e. never restarted and never bound over.
