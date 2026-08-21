@@ -1,6 +1,10 @@
 # Agent subprocess lifetime — who owns it, and what a reload actually destroys
 
-> Status: **decision document. Nothing is implemented.** No production file was touched.
+> Status: **§6 accepted by the owner, 2026-08-21. Option F is approved to build;
+> B+C is the accepted sequel and has NOT started. Nothing is implemented yet.**
+> No production file was touched by this document. See §6.0 for exactly what was
+> and was not decided — in particular **T and N are still unchosen**, and the one
+> experiment that could overturn §6 has not been run (§7.2).
 > Work item: tether#134. Read against tether `5f96f7f` (`#211`/`#212`/`#213` landed).
 > Measurements taken 2026-08-21 against a purpose-built isolated daemon, never the owner's.
 
@@ -567,6 +571,41 @@ done.** F is what that candidate becomes once you know that.
 ---
 
 ## 6. Recommendation
+
+### 6.0 What the owner actually decided — 2026-08-21
+
+Recorded so that "recommended" below is not later read as either more or less
+than it is.
+
+**Accepted:**
+
+- **F ships now, as its own work item.** Approved to build. Its scope is §5-F:
+  stop offering a dead session's pending requests as answerable, and say once
+  that the turn did not survive. It does not prejudice the lifetime decision.
+- **B+C is the accepted direction for the lifetime, as one piece of work, after
+  F.** Not started. Filed separately so it cannot be picked up piecemeal — §6.4
+  is the reason B alone is not acceptable.
+- **A is rejected as the resting place**, on §2.4's grounds: staying on it keeps
+  an accidental 0–43s grace period and a reload whose effect the user cannot
+  predict. E stays rejected on mechanism (§5-E). D remains a later feature.
+
+**NOT decided, and deliberately still open:**
+
+- **T (the idle-eviction interval) and N (the cap).** §6.5 stands: neither is
+  picked here. N specifically **cannot** be picked yet — it needs §7.4, the
+  resident cost of one live agent, which is filed as its own measurement task.
+- **Whether §6 survives contact with a real browser.** §7.2 is the cheapest
+  experiment that could overturn point 2 of §6, and it **has not been run** —
+  this machine has no display server, so it needs a machine that has one. Until
+  then §2.4's ~41s is a Go-client number and, per §7.2, must not be quoted as
+  the browser's.
+
+⇒ Reading guide: everything below §6.0 is the analysis that produced the
+decision, not a second decision. If §7.2 later shows a browser's close is
+reliably observed, re-read §6 point 2 before building B+C — F is unaffected
+either way, which is why it went first.
+
+---
 
 **Ship F now, independently. Then do B+C as one piece of work.**
 
