@@ -558,11 +558,18 @@ property of the machine, not of tether.
   That is a tool listing, it is read-only, and it is what a daemon-spawned agent
   does — so it is fidelity, not contamination. Named because it is a real
   interaction with a process this work item did not own.
-- **The provider wrote its own transcript**, under a *new* project directory
-  keyed on the probe's cwd. Nothing pre-existing under `~/.claude/projects` or
-  `~/.claude/sessions` was written, renamed, truncated or deleted, and the new
-  directory was **left in place** — deleting it would itself have been a write
-  to that tree.
+- **The provider wrote its own transcript.** Accounted for exactly, by listing
+  directory names only and opening no file: **one new project directory**
+  (`projects/-root-…-probe138-home-ws`, 7 entries, keyed on the probe's cwd,
+  37 project directories in total afterwards) and **zero additions under
+  `sessions/`** — the latter checked by matching the three session ids this probe
+  minted against the 146 entry names, because "the name does not contain
+  `probe138`" would prove nothing in a tree whose entries are named by session
+  id. Nothing pre-existing in either tree was written, renamed, truncated or
+  deleted, and the new directory was **left in place** — deleting it would itself
+  have been a write to that tree. (Incidental confirmation of the fake-agent
+  contract's fact ①: all three ids came back on `result` verbatim, so
+  `--session-id` is still adopted at `2.1.237`.)
 - The stand-in arm ran with `TETHER_NO_PERMISSION_HOOK=1` and
   `--skip-mcp-inject`, as in §2.1.
 
